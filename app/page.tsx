@@ -34,7 +34,7 @@ const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
 
-// ─── E2EE Helpers (Moved outside to prevent recreation) ──────────────────────
+// ─── E2EE Helpers ────────────────────────────────────────────────────────────
 let _privateKey: CryptoKey | null = null;
 const _sharedCache = new Map<string, CryptoKey>();
 
@@ -53,8 +53,18 @@ const _loadPrivKey = async () => {
   return crypto.subtle.importKey("jwk", JSON.parse(stored), { name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
 };
 
+// FIX 1: extractable=false for public key — more compatible across Safari/Firefox
 const _importPubKey = (jwkStr: string) =>
-  crypto.subtle.importKey("jwk", JSON.parse(jwkStr), { name: "ECDH", namedCurve: "P-256" }, true, []);
+  crypto.subtle.importKey("jwk", JSON.parse(jwkStr), { name: "ECDH", namedCurve: "P-256" }, false, []);
+
+// FIX 2: loop-based Uint8Array → binary string, avoids stack overflow from spread
+const _uint8ToBase64 = (buf: Uint8Array): string => {
+  let binary = "";
+  for (let i = 0; i < buf.length; i++) {
+    binary += String.fromCharCode(buf[i]);
+  }
+  return btoa(binary);
+};
 
 export default function CipherChat() {
   // ─── State ──────────────────────────────────────────────────────────────────
@@ -93,7 +103,7 @@ export default function CipherChat() {
   const [editDisplayName, setEditDisplayName] = useState("");
 
   const [isRecording, setIsRecording] = useState(false);
-  const [callState, setCallState] = useState<CallState>("idle"); // 'idle' | 'incoming' | 'calling' | 'connected'
+  const [callState, setCallState] = useState<CallState>("idle");
   const [isVideoCall, setIsVideoCall] = useState(false);
   const [callPeer, setCallPeer] = useState<string | null>(null);
 
@@ -131,26 +141,34 @@ export default function CipherChat() {
     return res.json();
   }, [token]);
 
-  // ─── Crypto Helpers mapped to component state ───────────────────────────────
+  // ─── Crypto Helpers ──────────────────────────────────────────────────────────
   const _getSharedKey = useCallback(async (phone: string) => {
     if (_sharedCache.has(phone)) return _sharedCache.get(phone);
     if (!_privateKey) return null;
     const profile = await apiFetch<ApiProfile>(`/profile/${encodeURIComponent(phone)}`).catch(() => null);
     if (!profile?.public_key) return null;
     const peerPub = await _importPubKey(profile.public_key);
-    const key = await crypto.subtle.deriveKey({ name: "ECDH", public: peerPub }, _privateKey, { name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+    const key = await crypto.subtle.deriveKey(
+      { name: "ECDH", public: peerPub },
+      _privateKey,
+      { name: "AES-GCM", length: 256 },
+      false,
+      ["encrypt", "decrypt"]
+    );
     _sharedCache.set(phone, key);
     return key;
   }, [apiFetch]);
 
+  // FIX: use _uint8ToBase64 instead of btoa(String.fromCharCode(...buf))
   const encryptDM = async (text: string, phone: string) => {
     const key = await _getSharedKey(phone);
     if (!key) return text;
     const iv = crypto.getRandomValues(new Uint8Array(12));
     const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
     const buf = new Uint8Array(12 + ct.byteLength);
-    buf.set(iv); buf.set(new Uint8Array(ct), 12);
-    return "[E2EE]" + btoa(String.fromCharCode(...buf));
+    buf.set(iv);
+    buf.set(new Uint8Array(ct), 12);
+    return "[E2EE]" + _uint8ToBase64(buf);
   };
 
   const decryptDM = useCallback(async (cipher: string, phone: string) => {
@@ -184,13 +202,16 @@ export default function CipherChat() {
       const { type, id } = chat;
       const base = type === "user" ? `/messages/direct/${encodeURIComponent(id)}` : `/messages/group/${id}`;
       const history = await apiFetch<Message[]>(base + (beforeId ? `?before_id=${beforeId}` : ""));
-      const decoded = await Promise.all(history.map(async m => ({ ...m, content: type === "user" ? await decryptDM(m.content, String(id)) : m.content })));
+      const decoded = await Promise.all(history.map(async m => ({
+        ...m,
+        content: type === "user" ? await decryptDM(m.content, String(id)) : m.content
+      })));
 
       if (beforeId) {
         setMessages(prev => [...decoded, ...prev]);
       } else {
         setMessages(decoded);
-        setTimeout(scrollBottom, 100); // Wait for render
+        setTimeout(scrollBottom, 100);
       }
       setHasMore(history.length === PAGE);
     } catch { }
@@ -240,7 +261,8 @@ export default function CipherChat() {
     };
 
     ws.onmessage = async ({ data: raw }) => {
-      let data: Partial<Message> & Record<string, unknown>; try { data = JSON.parse(raw); } catch { return; }
+      let data: Partial<Message> & Record<string, unknown>;
+      try { data = JSON.parse(raw); } catch { return; }
 
       switch (data.type) {
         case "typing":
@@ -294,7 +316,9 @@ export default function CipherChat() {
         case "message_edited": {
           setActiveChat(currentActive => {
             void (async () => {
-              const decContent = currentActive?.type === "user" ? await decryptDM(String(data.content || ""), String(currentActive.id)) : String(data.content || "");
+              const decContent = currentActive?.type === "user"
+                ? await decryptDM(String(data.content || ""), String(currentActive.id))
+                : String(data.content || "");
               setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: decContent, edited_at: data.edited_at } : m));
             })();
             return currentActive;
@@ -364,14 +388,17 @@ export default function CipherChat() {
   const verifyOTP = async () => {
     setAuthError(""); setAuthLoading(true);
     try {
-      const data = await apiFetch<{ access_token: string }>("/auth/verify-otp", { method: "POST", body: JSON.stringify({ phone_number: phoneNumber.trim(), otp: otp.trim() }) });
+      const data = await apiFetch<{ access_token: string }>("/auth/verify-otp", {
+        method: "POST",
+        body: JSON.stringify({ phone_number: phoneNumber.trim(), otp: otp.trim() })
+      });
       setToken(data.access_token);
       setCurrentUser(phoneNumber.trim());
       localStorage.setItem("chat_token", data.access_token);
       localStorage.setItem("chat_user", phoneNumber.trim());
 
       _privateKey = await _loadPrivKey();
-      let pubKey;
+      let pubKey: string;
       if (_privateKey) {
         pubKey = localStorage.getItem("chat_pubkey") || await _genKeyPair();
       } else {
@@ -595,7 +622,6 @@ export default function CipherChat() {
     return out;
   }, [messages]);
 
-  // Prevent SSR mismatch
   if (!isMounted) return null;
 
   // ─── RENDER ─────────────────────────────────────────────────────────────────
@@ -717,8 +743,28 @@ export default function CipherChat() {
               </div>
               {showNewContact && (
                 <div className="sb-add-form drop">
-                  <input value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) }).then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); }) } }} placeholder="+91 phone number…" className="sb-field" autoFocus />
-                  <button onClick={() => { apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) }).then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); }) }} className="sb-go-btn">Start chat</button>
+                  <input
+                    value={newContactPhone}
+                    onChange={e => setNewContactPhone(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) })
+                          .then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); });
+                      }
+                    }}
+                    placeholder="+91 phone number…"
+                    className="sb-field"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => {
+                      apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) })
+                        .then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); });
+                    }}
+                    className="sb-go-btn"
+                  >
+                    Start chat
+                  </button>
                 </div>
               )}
               <div className="sb-list">
@@ -754,13 +800,17 @@ export default function CipherChat() {
                   <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)} placeholder="Group name *" className="sb-field" />
                   <input value={newGroupMembers} onChange={e => setNewGroupMembers(e.target.value)} placeholder="Members (comma-separated) *" className="sb-field" />
                   <input value={newGroupDesc} onChange={e => setNewGroupDesc(e.target.value)} placeholder="Description (optional)" className="sb-field" />
-                  <button onClick={() => {
-                    const members = newGroupMembers.trim().split(",").map(s => s.trim()).filter(Boolean);
-                    if (!newGroupName.trim() || !members.length) return;
-                    apiFetch("/groups", { method: "POST", body: JSON.stringify({ name: newGroupName.trim(), description: newGroupDesc, members }) }).then(() => {
-                      setNewGroupName(""); setNewGroupDesc(""); setNewGroupMembers(""); setShowNewGroup(false); loadGroups();
-                    });
-                  }} className="sb-go-btn purple">Create group</button>
+                  <button
+                    onClick={() => {
+                      const members = newGroupMembers.trim().split(",").map(s => s.trim()).filter(Boolean);
+                      if (!newGroupName.trim() || !members.length) return;
+                      apiFetch("/groups", { method: "POST", body: JSON.stringify({ name: newGroupName.trim(), description: newGroupDesc, members }) })
+                        .then(() => { setNewGroupName(""); setNewGroupDesc(""); setNewGroupMembers(""); setShowNewGroup(false); loadGroups(); });
+                    }}
+                    className="sb-go-btn purple"
+                  >
+                    Create group
+                  </button>
                 </div>
               )}
               <div className="sb-list">
