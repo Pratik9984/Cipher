@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo, useCallback, useSyncExternalStore } from "react";
+import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 
 type Chat = { type: "user" | "group"; id: string | number; name: string };
 type Contact = {
@@ -33,9 +33,6 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
-const subscribeMounted = () => () => { };
-const getMountedSnapshot = () => true;
-const getServerMountedSnapshot = () => false;
 
 // ─── E2EE Helpers (Moved outside to prevent recreation) ──────────────────────
 let _privateKey: CryptoKey | null = null;
@@ -61,7 +58,8 @@ const _importPubKey = (jwkStr: string) =>
 
 export default function CipherChat() {
   // ─── State ──────────────────────────────────────────────────────────────────
-  const isMounted = useSyncExternalStore(subscribeMounted, getMountedSnapshot, getServerMountedSnapshot);
+  const [isMounted, setIsMounted] = useState(false);
+  useEffect(() => setIsMounted(true), []);
   const [phoneNumber, setPhoneNumber] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
