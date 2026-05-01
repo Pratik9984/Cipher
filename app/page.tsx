@@ -87,6 +87,7 @@ export default function CipherChat() {
   const pendingRemoteDescriptionRef = useRef<RTCSessionDescriptionInit | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
+  const messagesCache = useRef<Record<string, Message[]>>({});
 
   const emojis = ["😀", "😂", "🥰", "😎", "🤔", "😭", "😡", "👍", "❤️", "🔥", "🎉", "🚀", "✅", "💯", "🙏", "🫡", "😤", "🤩", "💀", "🫶"];
   const PAGE = 50;
@@ -128,11 +129,16 @@ export default function CipherChat() {
       const { type, id } = chat;
       const base = type === "user" ? `/messages/direct/${encodeURIComponent(id)}` : `/messages/group/${id}`;
       const history = await apiFetch<Message[]>(base + (beforeId ? `?before_id=${beforeId}` : ""));
-      
+
       if (beforeId) {
-        setMessages(prev => [...history, ...prev]);
+        setMessages(prev => {
+          const next = [...history, ...prev];
+          messagesCache.current[chat.id] = next;
+          return next;
+        });
       } else {
         setMessages(history);
+        messagesCache.current[chat.id] = history;
         setTimeout(scrollBottom, 100);
       }
       setHasMore(history.length === PAGE);
@@ -205,7 +211,22 @@ export default function CipherChat() {
 
           setActiveChat(currentActive => {
             if (currentActive?.type === "user" && currentActive.id === peer) {
-              setMessages(prev => [...prev, msg]);
+              setMessages(prev => {
+                let next = prev;
+                if (data.user === currentUser) {
+                  const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
+                  if (idx !== -1) {
+                    next = [...prev];
+                    next[idx] = msg;
+                  } else if (!prev.find(m => m.id === msg.id)) {
+                    next = [...prev, msg];
+                  }
+                } else if (!prev.find(m => m.id === msg.id)) {
+                  next = [...prev, msg];
+                }
+                messagesCache.current[peer] = next;
+                return next;
+              });
               setTimeout(scrollBottom, 50);
               if (data.user !== currentUser && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: "read_receipt", target_user: peer }));
@@ -221,7 +242,23 @@ export default function CipherChat() {
         case "group_message": {
           setActiveChat(currentActive => {
             if (currentActive?.type === "group" && currentActive.id === data.group_id) {
-              setMessages(prev => [...prev, { ...data } as Message]);
+              setMessages(prev => {
+                let next = prev;
+                const msg = data as Message;
+                if (data.user === currentUser) {
+                  const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
+                  if (idx !== -1) {
+                    next = [...prev];
+                    next[idx] = msg;
+                  } else if (!prev.find(m => m.id === msg.id)) {
+                    next = [...prev, msg];
+                  }
+                } else if (!prev.find(m => m.id === msg.id)) {
+                  next = [...prev, msg];
+                }
+                messagesCache.current[data.group_id as string | number] = next;
+                return next;
+              });
               setTimeout(scrollBottom, 50);
             } else if (data.user !== currentUser) {
               setUnread(prev => ({ ...prev, [String(data.group_id)]: (prev[String(data.group_id)] || 0) + 1 }));
@@ -327,7 +364,12 @@ export default function CipherChat() {
   // ─── Actions ─────────────────────────────────────────────────────────────────
   const openChat = async (chat: Chat) => {
     setActiveChat(chat);
-    setMessages([]);
+    if (messagesCache.current[chat.id]) {
+      setMessages(messagesCache.current[chat.id]);
+      setTimeout(scrollBottom, 10);
+    } else {
+      setMessages([]);
+    }
     setHasMore(false);
     setShowEmojis(false);
     setEditingId(null);
@@ -341,6 +383,21 @@ export default function CipherChat() {
     setInputMsg(""); setShowEmojis(false);
 
     const { type, id } = activeChat;
+
+    const optimisticMsg: Message = {
+      id: `temp-${Date.now()}-${Math.random()}`,
+      user: currentUser,
+      content: text,
+      timestamp: new Date().toISOString(),
+      ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+    };
+    
+    setMessages(prev => {
+      const next = [...prev, optimisticMsg];
+      messagesCache.current[id] = next;
+      return next;
+    });
+    setTimeout(scrollBottom, 50);
 
     wsRef.current.send(JSON.stringify(type === "user"
       ? { type: "direct_message", target_user: id, content: text, message_type: "text" }
@@ -382,8 +439,22 @@ export default function CipherChat() {
       const isAud = data.content_type?.startsWith("audio");
       const tag = isImg ? `[IMAGE]${data.url}` : isAud ? `[AUDIO]${data.url}` : `[FILE]${data.url}`;
       const msgType = isImg ? "image" : isAud ? "audio" : "file";
-
       const { type, id } = activeChat;
+
+      const optimisticMsg: Message = {
+        id: `temp-${Date.now()}-${Math.random()}`,
+        user: currentUser,
+        content: tag,
+        timestamp: new Date().toISOString(),
+        ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+      };
+      setMessages(prev => {
+        const next = [...prev, optimisticMsg];
+        messagesCache.current[id] = next;
+        return next;
+      });
+      setTimeout(scrollBottom, 50);
+
       wsRef.current?.send(JSON.stringify(type === "user"
         ? { type: "direct_message", target_user: id, content: tag, message_type: msgType }
         : { type: "group_message", group_id: id, content: tag, message_type: msgType }));
@@ -414,8 +485,22 @@ export default function CipherChat() {
         const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
         const data = await res.json();
         const tag = `[AUDIO]${data.url}`;
-
         const { type, id } = activeChat;
+
+        const optimisticMsg: Message = {
+          id: `temp-${Date.now()}-${Math.random()}`,
+          user: currentUser,
+          content: tag,
+          timestamp: new Date().toISOString(),
+          ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+        };
+        setMessages(prev => {
+          const next = [...prev, optimisticMsg];
+          messagesCache.current[id] = next;
+          return next;
+        });
+        setTimeout(scrollBottom, 50);
+
         wsRef.current?.send(JSON.stringify(type === "user"
           ? { type: "direct_message", target_user: id, content: tag, message_type: "audio" }
           : { type: "group_message", group_id: id, content: tag, message_type: "audio" }));
@@ -521,7 +606,11 @@ export default function CipherChat() {
     return out;
   }, [messages]);
 
-  if (!isMounted) return null;
+  if (!isMounted) return (
+    <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", width: "100vw", height: "100vh" }}>
+      <div className="spinner" style={{ width: 40, height: 40, border: "3px solid rgba(255,255,255,0.1)", borderTopColor: "var(--gold)" }}></div>
+    </div>
+  );
 
   // ─── RENDER ─────────────────────────────────────────────────────────────────
   return (
