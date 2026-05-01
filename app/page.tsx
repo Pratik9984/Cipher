@@ -146,9 +146,15 @@ export default function CipherChat() {
   }, [token]);
 
   // ─── Crypto Helpers ──────────────────────────────────────────────────────────
-  const _getSharedKey = useCallback(async (phone: string) => {
-    if (_sharedCache.has(phone)) return _sharedCache.get(phone);
+ const _getSharedKey = useCallback(async (phone: string) => {
+  if (_sharedCache.has(phone)) return _sharedCache.get(phone);
+
+  // Lazy-load: if key isn't in memory yet, try storage once before giving up.
+  if (!_privateKey) {
+    _privateKey = await _loadPrivKey();
     if (!_privateKey) return null;
+  }
+  // ... rest of the function (unchanged)
     const profile = await apiFetch<ApiProfile>(`/profile/${encodeURIComponent(phone)}`).catch(() => null);
     if (!profile?.public_key) return null;
     const peerPub = await _importPubKey(profile.public_key);
@@ -367,17 +373,18 @@ export default function CipherChat() {
   }, [initWS]);
 
   useEffect(() => {
-    if (token) {
-      _loadPrivKey().then(k => _privateKey = k);
-      setTimeout(() => {
-        void Promise.all([loadContacts(), loadGroups()]);
-        initWS();
-      }, 0);
-    }
-    return () => {
-      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
-    };
-  }, [token, loadContacts, loadGroups, initWS]);
+  if (token) {
+    (async () => {
+      // Always wait for the key to be in memory BEFORE loading anything.
+      _privateKey = await _loadPrivKey();
+      await Promise.all([loadContacts(), loadGroups()]);
+      initWS();
+    })();
+  }
+  return () => {
+    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
+  };
+}, [token, loadContacts, loadGroups, initWS]);
 
   // ─── Authentication ──────────────────────────────────────────────────────────
   const sendOTP = async () => {
@@ -402,12 +409,15 @@ export default function CipherChat() {
       localStorage.setItem("chat_user", phoneNumber.trim());
 
       _privateKey = await _loadPrivKey();
-      let pubKey: string;
-      if (_privateKey) {
-        pubKey = localStorage.getItem("chat_pubkey") || await _genKeyPair();
-      } else {
-        pubKey = await _genKeyPair();
-      }
+let pubKey: string | null = localStorage.getItem("chat_pubkey");
+
+if (_privateKey && pubKey) {
+  // Both halves present — reuse the existing key pair.
+} else {
+  // Either nothing exists or the pair is inconsistent → generate fresh.
+  pubKey = await _genKeyPair();          // sets _privateKey internally
+  _privateKey = await _loadPrivKey();    // sync in-memory ref to the new key
+}
 
       await apiFetch<void>("/profile/me", { method: "PATCH", body: JSON.stringify({ public_key: pubKey }) });
       _sharedCache.clear();
