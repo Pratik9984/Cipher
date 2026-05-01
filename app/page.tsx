@@ -53,11 +53,9 @@ const _loadPrivKey = async () => {
   return crypto.subtle.importKey("jwk", JSON.parse(stored), { name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
 };
 
-// FIX 1: extractable=false for public key — more compatible across Safari/Firefox
 const _importPubKey = (jwkStr: string) =>
   crypto.subtle.importKey("jwk", JSON.parse(jwkStr), { name: "ECDH", namedCurve: "P-256" }, false, []);
 
-// FIX 2: loop-based Uint8Array → binary string, avoids stack overflow from spread
 const _uint8ToBase64 = (buf: Uint8Array): string => {
   let binary = "";
   for (let i = 0; i < buf.length; i++) {
@@ -132,11 +130,8 @@ export default function CipherChat() {
     const headers = new Headers(opts.headers);
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     headers.set("ngrok-skip-browser-warning", "true");
-    
-    // FIX: Fallback to localStorage if the React state token is still empty during login
     const currentToken = token || (typeof window !== "undefined" ? localStorage.getItem("chat_token") : "");
     if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
-    
     const res = await fetch(`${API}${path}`, { ...opts, headers });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: "Request failed" }));
@@ -146,15 +141,18 @@ export default function CipherChat() {
   }, [token]);
 
   // ─── Crypto Helpers ──────────────────────────────────────────────────────────
- const _getSharedKey = useCallback(async (phone: string) => {
-  if (_sharedCache.has(phone)) return _sharedCache.get(phone);
 
-  // Lazy-load: if key isn't in memory yet, try storage once before giving up.
-  if (!_privateKey) {
-    _privateKey = await _loadPrivKey();
-    if (!_privateKey) return null;
-  }
-  // ... rest of the function (unchanged)
+  // FIX: bustCache param allows callers to force a fresh key derivation when
+  // decryption fails (handles the case where the peer regenerated their key pair).
+  const _getSharedKey = useCallback(async (phone: string, bustCache = false) => {
+    if (!bustCache && _sharedCache.has(phone)) return _sharedCache.get(phone)!;
+
+    // Lazy-load: if key isn't in memory yet, try storage once before giving up.
+    if (!_privateKey) {
+      _privateKey = await _loadPrivKey();
+      if (!_privateKey) return null;
+    }
+
     const profile = await apiFetch<ApiProfile>(`/profile/${encodeURIComponent(phone)}`).catch(() => null);
     if (!profile?.public_key) return null;
     const peerPub = await _importPubKey(profile.public_key);
@@ -169,8 +167,8 @@ export default function CipherChat() {
     return key;
   }, [apiFetch]);
 
-  // FIX: use _uint8ToBase64 instead of btoa(String.fromCharCode(...buf))
-  const encryptDM = async (text: string, phone: string) => {
+  // FIX: useCallback so it always closes over the latest _getSharedKey.
+  const encryptDM = useCallback(async (text: string, phone: string): Promise<string> => {
     const key = await _getSharedKey(phone);
     if (!key) return text;
     const iv = crypto.getRandomValues(new Uint8Array(12));
@@ -179,17 +177,37 @@ export default function CipherChat() {
     buf.set(iv);
     buf.set(new Uint8Array(ct), 12);
     return "[E2EE]" + _uint8ToBase64(buf);
-  };
+  }, [_getSharedKey]);
 
-  const decryptDM = useCallback(async (cipher: string, phone: string) => {
+  // FIX: two-attempt retry with cache busting. On first failure, delete the
+  // stale cache entry and re-fetch the peer's current public key, then retry.
+  // Only returns "[decryption failed]" if both attempts throw.
+  const decryptDM = useCallback(async (cipher: string, phone: string): Promise<string> => {
     if (!cipher.startsWith("[E2EE]")) return cipher;
-    try {
-      const key = await _getSharedKey(phone);
+
+    const attempt = async (bustCache: boolean): Promise<string> => {
+      const key = await _getSharedKey(phone, bustCache);
       if (!key) return "[encrypted — no key]";
       const buf = Uint8Array.from(atob(cipher.slice(6)), c => c.charCodeAt(0));
-      const dec = await crypto.subtle.decrypt({ name: "AES-GCM", iv: buf.slice(0, 12) }, key, buf.slice(12));
+      const dec = await crypto.subtle.decrypt(
+        { name: "AES-GCM", iv: buf.slice(0, 12) },
+        key,
+        buf.slice(12)
+      );
       return new TextDecoder().decode(dec);
-    } catch { return "[decryption failed]"; }
+    };
+
+    try {
+      return await attempt(false);
+    } catch {
+      // Cached key may be stale — bust it, re-fetch peer's latest public key, retry.
+      _sharedCache.delete(phone);
+      try {
+        return await attempt(true);
+      } catch {
+        return "[decryption failed]";
+      }
+    }
   }, [_getSharedKey]);
 
   // ─── Data Loaders ───────────────────────────────────────────────────────────
@@ -372,21 +390,23 @@ export default function CipherChat() {
     initWSRef.current = initWS;
   }, [initWS]);
 
+  // FIX: wait for private key to load before initialising contacts, groups and WS.
+  // The original setTimeout(0) raced against _loadPrivKey, causing decryption
+  // to run with _privateKey still null.
   useEffect(() => {
-  if (token) {
-    (async () => {
-      // Always wait for the key to be in memory BEFORE loading anything.
-      _privateKey = await _loadPrivKey();
-      await Promise.all([loadContacts(), loadGroups()]);
-      initWS();
-    })();
-  }
-  return () => {
-    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
-  };
-}, [token, loadContacts, loadGroups, initWS]);
+    if (token) {
+      (async () => {
+        _privateKey = await _loadPrivKey();
+        await Promise.all([loadContacts(), loadGroups()]);
+        initWS();
+      })();
+    }
+    return () => {
+      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
+    };
+  }, [token, loadContacts, loadGroups, initWS]);
 
-  // ─── Authentication ──────────────────────────────────────────────────────────
+  // ─── Authentication ───────────────────────────────────────────────────────────
   const sendOTP = async () => {
     setAuthError(""); setAuthLoading(true);
     try {
@@ -408,26 +428,37 @@ export default function CipherChat() {
       localStorage.setItem("chat_token", data.access_token);
       localStorage.setItem("chat_user", phoneNumber.trim());
 
-      _privateKey = await _loadPrivKey();
-let pubKey: string | null = localStorage.getItem("chat_pubkey");
+      // FIX: check localStorage directly (not the in-memory ref) to decide
+      // whether to reuse or generate. Only regenerate if BOTH halves are absent.
+      // The old code called _genKeyPair() whenever chat_pubkey was missing even
+      // if chat_privkey existed, silently replacing the entire key pair and
+      // making all previously-encrypted messages unrecoverable.
+      const existingPriv = localStorage.getItem("chat_privkey");
+      const existingPub  = localStorage.getItem("chat_pubkey");
+      let pubKey: string;
 
-if (_privateKey && pubKey) {
-  // Both halves present — reuse the existing key pair.
-} else {
-  // Either nothing exists or the pair is inconsistent → generate fresh.
-  pubKey = await _genKeyPair();          // sets _privateKey internally
-  _privateKey = await _loadPrivKey();    // sync in-memory ref to the new key
-}
+      if (existingPriv && existingPub) {
+        _privateKey = await _loadPrivKey();
+        pubKey = existingPub;
+      } else {
+        pubKey = await _genKeyPair();         // sets _privateKey internally
+        _privateKey = await _loadPrivKey();   // re-sync in-memory ref
+      }
 
-      await apiFetch<void>("/profile/me", { method: "PATCH", body: JSON.stringify({ public_key: pubKey }) });
       _sharedCache.clear();
+      await apiFetch<void>("/profile/me", { method: "PATCH", body: JSON.stringify({ public_key: pubKey }) });
 
       if ("Notification" in window) Notification.requestPermission();
     } catch (e) { setAuthError(errorMessage(e)); }
     finally { setAuthLoading(false); }
   };
 
+  // FIX: reset _privateKey and _sharedCache on logout so the next user who
+  // opens the app on the same browser doesn't inherit stale crypto state.
   const logout = () => {
+    _privateKey = null;
+    _sharedCache.clear();
+
     setToken(""); setCurrentUser(""); setOtpSent(false);
     setMessages([]); setActiveChat(null); setContacts([]); setGroups([]); setUnread({});
     localStorage.removeItem("chat_token"); localStorage.removeItem("chat_user");
