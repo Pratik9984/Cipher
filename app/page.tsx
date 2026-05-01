@@ -435,10 +435,21 @@ export default function CipherChat() {
       const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
       if (!res.ok) { alert("Upload failed"); return; }
       const data = await res.json();
+      
+      // Identify the precise content type
       const isImg = data.content_type?.startsWith("image");
       const isAud = data.content_type?.startsWith("audio");
-      const tag = isImg ? `[IMAGE]${data.url}` : isAud ? `[AUDIO]${data.url}` : `[FILE]${data.url}`;
-      const msgType = isImg ? "image" : isAud ? "audio" : "file";
+      const isVid = data.content_type?.startsWith("video");
+      const isPdf = data.content_type === "application/pdf";
+      
+      // Assign the correct inline tag
+      const tag = isImg ? `[IMAGE]${data.url}` 
+                : isAud ? `[AUDIO]${data.url}` 
+                : isVid ? `[VIDEO]${data.url}` 
+                : isPdf ? `[PDF]${data.url}` 
+                : `[FILE]${data.url}`;
+                
+      const msgType = isImg ? "image" : isAud ? "audio" : isVid ? "video" : isPdf ? "pdf" : "file";
       const { type, id } = activeChat;
 
       const optimisticMsg: Message = {
@@ -448,6 +459,7 @@ export default function CipherChat() {
         timestamp: new Date().toISOString(),
         ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
       };
+      
       setMessages(prev => {
         const next = [...prev, optimisticMsg];
         messagesCache.current[id] = next;
@@ -888,11 +900,17 @@ export default function CipherChat() {
                             {activeChat.type === "group" && item.user !== currentUser && <span className="sender-name">{item.user}</span>}
                             <div className={`bubble ${item.user === currentUser ? "mine" : "theirs"}`}>
                               {item.content.startsWith("[IMAGE]") ? (
-                                <img src={item.content.replace("[IMAGE]", "")} alt="attachment" className="msg-img" />
+                                <img src={item.content.replace("[IMAGE]", "")} alt="attachment" className="msg-img" style={{ maxWidth: '100%', borderRadius: '8px' }} />
                               ) : item.content.startsWith("[AUDIO]") ? (
-                                <audio src={item.content.replace("[AUDIO]", "")} controls className="msg-audio"></audio>
+                                <audio src={item.content.replace("[AUDIO]", "")} controls className="msg-audio" style={{ maxWidth: '100%' }}></audio>
+                              ) : item.content.startsWith("[VIDEO]") ? (
+                                <video src={item.content.replace("[VIDEO]", "")} controls className="msg-video" style={{ maxWidth: '100%', borderRadius: '8px' }}></video>
+                              ) : item.content.startsWith("[PDF]") ? (
+                                <iframe src={item.content.replace("[PDF]", "")} className="msg-pdf" style={{ width: '100%', minHeight: '300px', border: 'none', borderRadius: '8px', backgroundColor: 'white' }} title="PDF attachment"></iframe>
                               ) : item.content.startsWith("[FILE]") ? (
-                                <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">Download file</a>
+                                <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">
+                                  Download file
+                                </a>
                               ) : (
                                 <span className="msg-text">{item.content}</span>
                               )}
