@@ -132,7 +132,11 @@ export default function CipherChat() {
     const headers = new Headers(opts.headers);
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
     headers.set("ngrok-skip-browser-warning", "true");
-    if (token) headers.set("Authorization", `Bearer ${token}`);
+    
+    // FIX: Fallback to localStorage if the React state token is still empty during login
+    const currentToken = token || (typeof window !== "undefined" ? localStorage.getItem("chat_token") : "");
+    if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
+    
     const res = await fetch(`${API}${path}`, { ...opts, headers });
     if (!res.ok) {
       const body = await res.json().catch(() => ({ detail: "Request failed" }));
