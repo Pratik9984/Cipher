@@ -26,43 +26,11 @@ type Message = {
 type GroupedMessage = ({ type: "divider"; label: string } | ({ type: "msg" } & Message));
 type CallState = "idle" | "incoming" | "calling" | "connected";
 type ApiOptions = RequestInit & { headers?: HeadersInit };
-type ApiProfile = { public_key?: string | null };
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "Request failed";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
-
-
-// ─── E2EE Helpers ────────────────────────────────────────────────────────────
-let _privateKey: CryptoKey | null = null;
-const _sharedCache = new Map<string, CryptoKey>();
-
-const _genKeyPair = async () => {
-  const kp = await crypto.subtle.generateKey({ name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
-  const pubJwk = JSON.stringify(await crypto.subtle.exportKey("jwk", kp.publicKey));
-  localStorage.setItem("chat_privkey", JSON.stringify(await crypto.subtle.exportKey("jwk", kp.privateKey)));
-  localStorage.setItem("chat_pubkey", pubJwk);
-  _privateKey = kp.privateKey;
-  return pubJwk;
-};
-
-const _loadPrivKey = async () => {
-  const stored = localStorage.getItem("chat_privkey");
-  if (!stored) return null;
-  return crypto.subtle.importKey("jwk", JSON.parse(stored), { name: "ECDH", namedCurve: "P-256" }, true, ["deriveKey"]);
-};
-
-const _importPubKey = (jwkStr: string) =>
-  crypto.subtle.importKey("jwk", JSON.parse(jwkStr), { name: "ECDH", namedCurve: "P-256" }, false, []);
-
-const _uint8ToBase64 = (buf: Uint8Array): string => {
-  let binary = "";
-  for (let i = 0; i < buf.length; i++) {
-    binary += String.fromCharCode(buf[i]);
-  }
-  return btoa(binary);
-};
 
 export default function CipherChat() {
   // ─── State ──────────────────────────────────────────────────────────────────
@@ -140,76 +108,6 @@ export default function CipherChat() {
     return res.json();
   }, [token]);
 
-  // ─── Crypto Helpers ──────────────────────────────────────────────────────────
-
-  // FIX: bustCache param allows callers to force a fresh key derivation when
-  // decryption fails (handles the case where the peer regenerated their key pair).
-  const _getSharedKey = useCallback(async (phone: string, bustCache = false) => {
-    if (!bustCache && _sharedCache.has(phone)) return _sharedCache.get(phone)!;
-
-    // Lazy-load: if key isn't in memory yet, try storage once before giving up.
-    if (!_privateKey) {
-      _privateKey = await _loadPrivKey();
-      if (!_privateKey) return null;
-    }
-
-    const profile = await apiFetch<ApiProfile>(`/profile/${encodeURIComponent(phone)}`).catch(() => null);
-    if (!profile?.public_key) return null;
-    const peerPub = await _importPubKey(profile.public_key);
-    const key = await crypto.subtle.deriveKey(
-      { name: "ECDH", public: peerPub },
-      _privateKey,
-      { name: "AES-GCM", length: 256 },
-      false,
-      ["encrypt", "decrypt"]
-    );
-    _sharedCache.set(phone, key);
-    return key;
-  }, [apiFetch]);
-
-  // FIX: useCallback so it always closes over the latest _getSharedKey.
-  const encryptDM = useCallback(async (text: string, phone: string): Promise<string> => {
-    const key = await _getSharedKey(phone);
-    if (!key) return text;
-    const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ct = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, key, new TextEncoder().encode(text));
-    const buf = new Uint8Array(12 + ct.byteLength);
-    buf.set(iv);
-    buf.set(new Uint8Array(ct), 12);
-    return "[E2EE]" + _uint8ToBase64(buf);
-  }, [_getSharedKey]);
-
-  // FIX: two-attempt retry with cache busting. On first failure, delete the
-  // stale cache entry and re-fetch the peer's current public key, then retry.
-  // Only returns "[decryption failed]" if both attempts throw.
-  const decryptDM = useCallback(async (cipher: string, phone: string): Promise<string> => {
-    if (!cipher.startsWith("[E2EE]")) return cipher;
-
-    const attempt = async (bustCache: boolean): Promise<string> => {
-      const key = await _getSharedKey(phone, bustCache);
-      if (!key) return "[encrypted — no key]";
-      const buf = Uint8Array.from(atob(cipher.slice(6)), c => c.charCodeAt(0));
-      const dec = await crypto.subtle.decrypt(
-        { name: "AES-GCM", iv: buf.slice(0, 12) },
-        key,
-        buf.slice(12)
-      );
-      return new TextDecoder().decode(dec);
-    };
-
-    try {
-      return await attempt(false);
-    } catch {
-      // Cached key may be stale — bust it, re-fetch peer's latest public key, retry.
-      _sharedCache.delete(phone);
-      try {
-        return await attempt(true);
-      } catch {
-        return "[decryption failed]";
-      }
-    }
-  }, [_getSharedKey]);
-
   // ─── Data Loaders ───────────────────────────────────────────────────────────
   const loadContacts = useCallback(async () => {
     try { setContacts(await apiFetch<Contact[]>("/contacts")); } catch { }
@@ -230,15 +128,11 @@ export default function CipherChat() {
       const { type, id } = chat;
       const base = type === "user" ? `/messages/direct/${encodeURIComponent(id)}` : `/messages/group/${id}`;
       const history = await apiFetch<Message[]>(base + (beforeId ? `?before_id=${beforeId}` : ""));
-      const decoded = await Promise.all(history.map(async m => ({
-        ...m,
-        content: type === "user" ? await decryptDM(m.content, String(id)) : m.content
-      })));
-
+      
       if (beforeId) {
-        setMessages(prev => [...decoded, ...prev]);
+        setMessages(prev => [...history, ...prev]);
       } else {
-        setMessages(decoded);
+        setMessages(history);
         setTimeout(scrollBottom, 100);
       }
       setHasMore(history.length === PAGE);
@@ -305,8 +199,7 @@ export default function CipherChat() {
           setTypingSet(prev => { const next = new Set(prev); next.delete(String(data.user)); return next; });
           const peer = data.user === currentUser ? (data.receiver_phone || data.target_user) : data.user;
           if (!peer) break;
-          const content = await decryptDM(String(data.content || ""), String(peer));
-          const msg = { ...data, content } as Message;
+          const msg = data as Message;
 
           setContacts(prev => prev.find(c => c.phone_number === peer) ? prev : [...prev, { phone_number: String(peer), display_name: null, is_online: false }]);
 
@@ -319,7 +212,7 @@ export default function CipherChat() {
               }
             } else if (data.user !== currentUser) {
               setUnread(prev => ({ ...prev, [String(peer)]: (prev[String(peer)] || 0) + 1 }));
-              notify(String(data.user), content);
+              notify(String(data.user), msg.content);
             }
             return currentActive;
           });
@@ -343,12 +236,7 @@ export default function CipherChat() {
           break;
         case "message_edited": {
           setActiveChat(currentActive => {
-            void (async () => {
-              const decContent = currentActive?.type === "user"
-                ? await decryptDM(String(data.content || ""), String(currentActive.id))
-                : String(data.content || "");
-              setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: decContent, edited_at: data.edited_at } : m));
-            })();
+            setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: String(data.content || ""), edited_at: data.edited_at } : m));
             return currentActive;
           });
           break;
@@ -384,19 +272,15 @@ export default function CipherChat() {
           break;
       }
     };
-  }, [token, currentUser, decryptDM, endCall]);
+  }, [token, currentUser, endCall]);
 
   useEffect(() => {
     initWSRef.current = initWS;
   }, [initWS]);
 
-  // FIX: wait for private key to load before initialising contacts, groups and WS.
-  // The original setTimeout(0) raced against _loadPrivKey, causing decryption
-  // to run with _privateKey still null.
   useEffect(() => {
     if (token) {
       (async () => {
-        _privateKey = await _loadPrivKey();
         await Promise.all([loadContacts(), loadGroups()]);
         initWS();
       })();
@@ -428,37 +312,12 @@ export default function CipherChat() {
       localStorage.setItem("chat_token", data.access_token);
       localStorage.setItem("chat_user", phoneNumber.trim());
 
-      // FIX: check localStorage directly (not the in-memory ref) to decide
-      // whether to reuse or generate. Only regenerate if BOTH halves are absent.
-      // The old code called _genKeyPair() whenever chat_pubkey was missing even
-      // if chat_privkey existed, silently replacing the entire key pair and
-      // making all previously-encrypted messages unrecoverable.
-      const existingPriv = localStorage.getItem("chat_privkey");
-      const existingPub  = localStorage.getItem("chat_pubkey");
-      let pubKey: string;
-
-      if (existingPriv && existingPub) {
-        _privateKey = await _loadPrivKey();
-        pubKey = existingPub;
-      } else {
-        pubKey = await _genKeyPair();         // sets _privateKey internally
-        _privateKey = await _loadPrivKey();   // re-sync in-memory ref
-      }
-
-      _sharedCache.clear();
-      await apiFetch<void>("/profile/me", { method: "PATCH", body: JSON.stringify({ public_key: pubKey }) });
-
       if ("Notification" in window) Notification.requestPermission();
     } catch (e) { setAuthError(errorMessage(e)); }
     finally { setAuthLoading(false); }
   };
 
-  // FIX: reset _privateKey and _sharedCache on logout so the next user who
-  // opens the app on the same browser doesn't inherit stale crypto state.
   const logout = () => {
-    _privateKey = null;
-    _sharedCache.clear();
-
     setToken(""); setCurrentUser(""); setOtpSent(false);
     setMessages([]); setActiveChat(null); setContacts([]); setGroups([]); setUnread({});
     localStorage.removeItem("chat_token"); localStorage.removeItem("chat_user");
@@ -482,19 +341,16 @@ export default function CipherChat() {
     setInputMsg(""); setShowEmojis(false);
 
     const { type, id } = activeChat;
-    const content = type === "user" ? await encryptDM(text, String(id)) : text;
 
     wsRef.current.send(JSON.stringify(type === "user"
-      ? { type: "direct_message", target_user: id, content, message_type: "text" }
-      : { type: "group_message", group_id: id, content, message_type: "text" }));
+      ? { type: "direct_message", target_user: id, content: text, message_type: "text" }
+      : { type: "group_message", group_id: id, content: text, message_type: "text" }));
   };
 
   const saveEdit = async () => {
     if (!editingId || !activeChat) return;
     try {
-      const { type, id } = activeChat;
-      const content = type === "user" ? await encryptDM(editingText, String(id)) : editingText;
-      await apiFetch<void>(`/messages/${editingId}`, { method: "PATCH", body: JSON.stringify({ content }) });
+      await apiFetch<void>(`/messages/${editingId}`, { method: "PATCH", body: JSON.stringify({ content: editingText }) });
       setMessages(prev => prev.map(m => m.id === editingId ? { ...m, content: editingText, edited_at: new Date().toISOString() } : m));
       setEditingId(null); setEditingText("");
     } catch { }
@@ -528,10 +384,9 @@ export default function CipherChat() {
       const msgType = isImg ? "image" : isAud ? "audio" : "file";
 
       const { type, id } = activeChat;
-      const content = type === "user" ? await encryptDM(tag, String(id)) : tag;
       wsRef.current?.send(JSON.stringify(type === "user"
-        ? { type: "direct_message", target_user: id, content, message_type: msgType }
-        : { type: "group_message", group_id: id, content, message_type: msgType }));
+        ? { type: "direct_message", target_user: id, content: tag, message_type: msgType }
+        : { type: "group_message", group_id: id, content: tag, message_type: msgType }));
     } catch { }
     e.target.value = "";
   };
@@ -561,10 +416,9 @@ export default function CipherChat() {
         const tag = `[AUDIO]${data.url}`;
 
         const { type, id } = activeChat;
-        const content = type === "user" ? await encryptDM(tag, String(id)) : tag;
         wsRef.current?.send(JSON.stringify(type === "user"
-          ? { type: "direct_message", target_user: id, content, message_type: "audio" }
-          : { type: "group_message", group_id: id, content, message_type: "audio" }));
+          ? { type: "direct_message", target_user: id, content: tag, message_type: "audio" }
+          : { type: "group_message", group_id: id, content: tag, message_type: "audio" }));
       };
       mr.start(); setIsRecording(true);
     } catch { }
@@ -687,13 +541,13 @@ export default function CipherChat() {
               <span className="brand-name">Cipher</span>
             </div>
             <div className="auth-hero">
-              <h1>Private.<br />Fast.<br /><em>Encrypted.</em></h1>
-              <p>End-to-end encrypted messaging with ECDH P-256 + AES-GCM 256-bit keys — zero server knowledge.</p>
+              <h1>Connect.<br />Fast.<br /><em>Simple.</em></h1>
+              <p>Real-time messaging platform built for speed and reliability.</p>
             </div>
             <div className="auth-pills">
-              <span className="a-pill a-pill--gold">🔒 E2EE</span>
-              <span className="a-pill">⚡ Real-time</span>
-              <span className="a-pill">🛡️ Zero-knowledge</span>
+              <span className="a-pill a-pill--gold">⚡ Fast</span>
+              <span className="a-pill">💬 Real-time</span>
+              <span className="a-pill">📱 Mobile-ready</span>
             </div>
           </div>
 
@@ -752,11 +606,6 @@ export default function CipherChat() {
               <div className="sb-id-info">
                 <span className="sb-id-name">{currentUser}</span>
                 <span className="sb-id-status"><span className="green-dot"></span>Online</span>
-              </div>
-              <div className="sb-id-badges">
-                <span className="lock-badge" title="End-to-end encrypted">
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
-                </span>
               </div>
             </div>
 
@@ -883,10 +732,6 @@ export default function CipherChat() {
                 </div>
                 <h3>No conversation open</h3>
                 <p>Select a contact or group from the sidebar to start messaging</p>
-                <div className="empty-enc-badge">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg>
-                  DMs use ECDH + AES-GCM 256-bit encryption
-                </div>
               </div>
             ) : (
               <>
@@ -923,15 +768,6 @@ export default function CipherChat() {
                           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
                         </button>
                       </>
-                    )}
-                    {activeChat.type === "user" ? (
-                      <span className="enc-tag">
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><rect x="3" y="11" width="18" height="11" rx="2" /><path d="M7 11V7a5 5 0 0110 0v4" /></svg> End-to-End Encrypted
-                      </span>
-                    ) : (
-                      <span className="enc-tag enc-tag--warn">
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" /><line x1="12" y1="9" x2="12" y2="13" /><line x1="12" y1="17" x2="12.01" y2="17" /></svg> No E2EE
-                      </span>
                     )}
                   </div>
                 </header>
@@ -1040,7 +876,7 @@ export default function CipherChat() {
                 </div>
                 <h2 className="call-name">{callPeer}</h2>
                 <p className="call-status">
-                  {callState === "incoming" ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...` : callState === "calling" ? "Calling..." : "Connected securely"}
+                  {callState === "incoming" ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...` : callState === "calling" ? "Calling..." : "Connected"}
                 </p>
               </div>
             )}
