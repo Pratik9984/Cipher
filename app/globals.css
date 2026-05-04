@@ -1248,12 +1248,7 @@ input {
    9. RESPONSIVE QUERIES (MOBILE)
    ========================================================================== */
 @media (max-width: 768px) {
-  /* This shrinks all 'rem' measurements by about 12.5%, making the whole UI fit better */
-  html {
-    font-size: 14px; 
-  }
-
-  /* Compact the Auth Screen */
+  html { font-size: 14px; }
   .auth-left { padding: 2rem; text-align: center; align-items: center; }
   .auth-right { padding: 1.5rem; align-items: flex-start; }
   .auth-screen { flex-direction: column; overflow-y: auto; }
@@ -1262,23 +1257,15 @@ input {
   .auth-hero p { font-size: 1.1rem; }
   .auth-card { padding: 2rem; }
 
-  /* Chat UI Scaling */
-  .chat-hdr { 
-    height: 60px; /* Slimmer header */
-    padding: 0 1rem; 
-  }
+  .chat-hdr { height: 60px; padding: 0 1rem; }
   .hdr-av { width: 34px; height: 34px; font-size: 0.9rem; }
-  .input-bar { 
-    padding: 0.5rem 1rem; /* Tighter input bar */
-  }
+  .input-bar { padding: 0.5rem 1rem; }
   .msg-input { padding: 10px 14px; }
   .tool-btn { padding: 6px; font-size: 1.1rem; }
   .send-btn { width: 36px; height: 36px; }
   .emoji-picker { bottom: 65px; left: 1rem; }
 
-  /* Mobile App Layout Toggle Logic */
   .shell { position: relative; overflow: hidden; }
-  
   .sidebar {
     width: 100%;
     transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
