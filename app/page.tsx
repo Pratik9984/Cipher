@@ -391,7 +391,7 @@ export default function CipherChat() {
       timestamp: new Date().toISOString(),
       ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
     };
-    
+
     setMessages(prev => {
       const next = [...prev, optimisticMsg];
       messagesCache.current[id] = next;
@@ -435,20 +435,20 @@ export default function CipherChat() {
       const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
       if (!res.ok) { alert("Upload failed"); return; }
       const data = await res.json();
-      
+
       // Identify the precise content type
       const isImg = data.content_type?.startsWith("image");
       const isAud = data.content_type?.startsWith("audio");
       const isVid = data.content_type?.startsWith("video");
       const isPdf = data.content_type === "application/pdf";
-      
+
       // Assign the correct inline tag
-      const tag = isImg ? `[IMAGE]${data.url}` 
-                : isAud ? `[AUDIO]${data.url}` 
-                : isVid ? `[VIDEO]${data.url}` 
-                : isPdf ? `[PDF]${data.url}` 
-                : `[FILE]${data.url}`;
-                
+      const tag = isImg ? `[IMAGE]${data.url}`
+        : isAud ? `[AUDIO]${data.url}`
+          : isVid ? `[VIDEO]${data.url}`
+            : isPdf ? `[PDF]${data.url}`
+              : `[FILE]${data.url}`;
+
       const msgType = isImg ? "image" : isAud ? "audio" : isVid ? "video" : isPdf ? "pdf" : "file";
       const { type, id } = activeChat;
 
@@ -459,7 +459,7 @@ export default function CipherChat() {
         timestamp: new Date().toISOString(),
         ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
       };
-      
+
       setMessages(prev => {
         const next = [...prev, optimisticMsg];
         messagesCache.current[id] = next;
@@ -628,10 +628,10 @@ export default function CipherChat() {
   return (
     <div className="app">
       {!isAuth ? (
-        <div className="auth-screen">
+        <div className="auth-screen row m-0 p-0 w-100 h-100">
           <div className="auth-glow auth-glow-1"></div>
           <div className="auth-glow auth-glow-2"></div>
-          <div className="auth-left">
+          <div className="auth-left col-12 col-md-7 col-lg-8 d-flex flex-column justify-content-center p-4 p-md-5">
             <div className="brand">
               <div className="brand-icon">
                 <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
@@ -652,7 +652,7 @@ export default function CipherChat() {
             </div>
           </div>
 
-          <div className="auth-right">
+          <div className="auth-right col-12 col-md-5 col-lg-4 d-flex align-items-center justify-content-center p-4">
             <div className="auth-card">
               {!otpSent ? (
                 <>
@@ -699,9 +699,10 @@ export default function CipherChat() {
           </div>
         </div>
       ) : (
-        <div className={`shell ${activeChat ? "chat-active" : ""}`}>
-          {/* Sidebar */}
-          <aside className="sidebar">
+        <div className={`shell container-fluid p-0 m-0 overflow-hidden h-100 position-relative ${activeChat ? "chat-active" : ""}`}>
+          <div className="row g-0 h-100 flex-nowrap w-100">
+            {/* Sidebar */}
+            <aside className={`sidebar col-12 col-md-4 col-lg-3 ${activeChat ? 'd-none d-md-flex' : 'd-flex'} flex-column p-0`}>
             <div className="sb-identity">
               <div className="sb-id-avatar">{(currentUser[0] || "?").toUpperCase()}</div>
               <div className="sb-id-info">
@@ -824,7 +825,7 @@ export default function CipherChat() {
           </aside>
 
           {/* Chat Main */}
-          <main className="chat">
+          <main className={`chat col-12 col-md-8 col-lg-9 ${activeChat ? 'd-flex' : 'd-none d-md-flex'} flex-column p-0`}>
             {!activeChat ? (
               <div className="empty-state">
                 <div className="empty-rings">
@@ -964,6 +965,7 @@ export default function CipherChat() {
               </>
             )}
           </main>
+          </div>
         </div>
       )}
 
