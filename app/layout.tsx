@@ -5,7 +5,7 @@ export const metadata: Metadata = {
   title: "Cipher Chat",
   description: "Real-time messaging platform built for speed and reliability.",
   icons: {
-    icon: "/favicon.ico",   // 👈 add this line
+    icon: "/icon.png",   // 👈 add this line
   },
 };
 
