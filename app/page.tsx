@@ -634,27 +634,6 @@ export default function CipherChat() {
   // ─── RENDER ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
-      {/* ADDED ANIMATIONS */}
-      <style>{`
-        @keyframes slideUpFade {
-          from { opacity: 0; transform: translateY(10px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        @keyframes pulseRing {
-          0% { box-shadow: 0 0 0 0 rgba(100, 100, 255, 0.4); transform: scale(1); }
-          50% { box-shadow: 0 0 0 15px rgba(100, 100, 255, 0); transform: scale(1.05); }
-          100% { box-shadow: 0 0 0 0 rgba(100, 100, 255, 0); transform: scale(1); }
-        }
-        .msg-row { animation: slideUpFade 0.3s ease-out forwards; }
-        .sb-item { transition: background 0.2s, transform 0.1s; }
-        .sb-item:active { transform: scale(0.98); }
-        .call-hdr-btn { transition: transform 0.2s, color 0.2s; }
-        .call-hdr-btn:hover { transform: scale(1.1); color: var(--gold, #ffcc00); }
-        .pulse-anim { animation: pulseRing 2s infinite; }
-        .msg-img, .msg-video { transition: transform 0.2s; cursor: pointer; }
-        .msg-img:hover, .msg-video:hover { transform: scale(1.02); }
-      `}</style>
-
       {!isAuth ? (
         <div className="auth-screen">
           <div className="auth-glow auth-glow-1"></div>
@@ -1026,12 +1005,12 @@ export default function CipherChat() {
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
                   <button onClick={acceptCall} className="call-btn btn-accept" title="Accept">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 011.72 2.03z" /></svg>
                   </button>
                 </>
               ) : (
                 <button onClick={() => endCall(true)} className="call-btn btn-end" title="End Call">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 011.72 2.03z" /></svg>
                 </button>
               )}
             </div>
