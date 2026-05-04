@@ -32,25 +32,10 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
-const MEDIA_PREFIXES = ["[IMAGE]", "[AUDIO]", "[VIDEO]", "[PDF]", "[FILE]"] as const;
-const isMediaMessage = (content: string) => MEDIA_PREFIXES.some(p => content.startsWith(p));
-
-// Detect and linkify URLs in plain text
-function renderText(content: string, isMine: boolean) {
-  const urlRegex = /(https?:\/\/[^\s]+)/g;
-  const parts = content.split(urlRegex);
-  return parts.map((part, i) =>
-    urlRegex.test(part)
-      ? <a key={i} href={part} target="_blank" rel="noreferrer" className={`msg-link ${isMine ? "msg-link--mine" : ""}`}>{part}</a>
-      : <React.Fragment key={i}>{part}</React.Fragment>
-  );
-}
-
 export default function CipherChat() {
   // ─── State ──────────────────────────────────────────────────────────────────
   const [isMounted, setIsMounted] = useState(false);
   useEffect(() => setIsMounted(true), []);
-
   const [phoneNumber, setPhoneNumber] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
@@ -59,6 +44,12 @@ export default function CipherChat() {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const isAuth = !!token;
+
+  useEffect(() => {
+    if (typeof document !== "undefined") {
+      document.body.classList.toggle("auth-mode", !isAuth);
+    }
+  }, [isAuth]);
 
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
@@ -83,14 +74,11 @@ export default function CipherChat() {
   const [newGroupMembers, setNewGroupMembers] = useState("");
   const [editDisplayName, setEditDisplayName] = useState("");
 
-  // FIX: File viewer modal state
-  const [viewerSrc, setViewerSrc] = useState<string | null>(null);
-  const [viewerType, setViewerType] = useState<"image" | "video" | "pdf" | null>(null);
-
   const [isRecording, setIsRecording] = useState(false);
   const [callState, setCallState] = useState<CallState>("idle");
   const [isVideoCall, setIsVideoCall] = useState(false);
   const [callPeer, setCallPeer] = useState<string | null>(null);
+  const [viewFile, setViewFile] = useState<{ url: string; type: string } | null>(null);
 
   // ─── Refs ───────────────────────────────────────────────────────────────────
   const msgListRef = useRef<HTMLDivElement | null>(null);
@@ -108,7 +96,7 @@ export default function CipherChat() {
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const messagesCache = useRef<Record<string, Message[]>>({});
 
-  const emojis = ["😀","😂","🥰","😎","🤔","😭","😡","👍","❤️","🔥","🎉","🚀","✅","💯","🙏","🫡","😤","🤩","💀","🫶","😏","🥺","😴","🤣","😊","🤯","💪","🤝","👏","✨"];
+  const emojis = ["😀", "😂", "🥰", "😎", "🤔", "😭", "😡", "👍", "❤️", "🔥", "🎉", "🚀", "✅", "💯", "🙏", "🫡", "😤", "🤩", "💀", "🫶"];
   const PAGE = 50;
 
   const isTyping = useMemo(() => activeChat?.type === "user" && typingSet.has(String(activeChat.id)), [activeChat, typingSet]);
@@ -137,10 +125,8 @@ export default function CipherChat() {
     try { setGroups(await apiFetch<Group[]>("/groups")); } catch { }
   }, [apiFetch]);
 
-  const scrollBottom = (smooth = false) => {
-    if (msgListRef.current) {
-      msgListRef.current.scrollTo({ top: msgListRef.current.scrollHeight, behavior: smooth ? "smooth" : "auto" });
-    }
+  const scrollBottom = () => {
+    if (msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
   };
 
   const loadHistory = async (chat: Chat, beforeId: string | number | null = null) => {
@@ -160,7 +146,7 @@ export default function CipherChat() {
       } else {
         setMessages(history);
         messagesCache.current[chat.id] = history;
-        setTimeout(() => scrollBottom(), 100);
+        setTimeout(scrollBottom, 100);
       }
       setHasMore(history.length === PAGE);
     } catch { }
@@ -222,7 +208,6 @@ export default function CipherChat() {
             }, 2000);
           }
           break;
-
         case "direct_message": {
           setTypingSet(prev => { const next = new Set(prev); next.delete(String(data.user)); return next; });
           const peer = data.user === currentUser ? (data.receiver_phone || data.target_user) : data.user;
@@ -238,7 +223,8 @@ export default function CipherChat() {
                 if (data.user === currentUser) {
                   const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
                   if (idx !== -1) {
-                    next = [...prev]; next[idx] = msg;
+                    next = [...prev];
+                    next[idx] = msg;
                   } else if (!prev.find(m => m.id === msg.id)) {
                     next = [...prev, msg];
                   }
@@ -248,7 +234,7 @@ export default function CipherChat() {
                 messagesCache.current[peer] = next;
                 return next;
               });
-              setTimeout(() => scrollBottom(true), 50);
+              setTimeout(scrollBottom, 50);
               if (data.user !== currentUser && ws.readyState === WebSocket.OPEN) {
                 ws.send(JSON.stringify({ type: "read_receipt", target_user: peer }));
               }
@@ -260,7 +246,6 @@ export default function CipherChat() {
           });
           break;
         }
-
         case "group_message": {
           setActiveChat(currentActive => {
             if (currentActive?.type === "group" && currentActive.id === data.group_id) {
@@ -270,7 +255,8 @@ export default function CipherChat() {
                 if (data.user === currentUser) {
                   const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
                   if (idx !== -1) {
-                    next = [...prev]; next[idx] = msg;
+                    next = [...prev];
+                    next[idx] = msg;
                   } else if (!prev.find(m => m.id === msg.id)) {
                     next = [...prev, msg];
                   }
@@ -280,7 +266,7 @@ export default function CipherChat() {
                 messagesCache.current[data.group_id as string | number] = next;
                 return next;
               });
-              setTimeout(() => scrollBottom(true), 50);
+              setTimeout(scrollBottom, 50);
             } else if (data.user !== currentUser) {
               setUnread(prev => ({ ...prev, [String(data.group_id)]: (prev[String(data.group_id)] || 0) + 1 }));
               notify(`${data.group_name}`, `${data.user}: ${data.content}`);
@@ -289,20 +275,19 @@ export default function CipherChat() {
           });
           break;
         }
-
         case "read_receipt":
           setMessages(prev => prev.map(m => m.user === currentUser ? { ...m, is_read: true } : m));
           break;
-
         case "message_edited": {
-          setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: String(data.content || ""), edited_at: data.edited_at } : m));
+          setActiveChat(currentActive => {
+            setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: String(data.content || ""), edited_at: data.edited_at } : m));
+            return currentActive;
+          });
           break;
         }
-
         case "message_deleted":
           setMessages(prev => prev.map(m => m.id === data.id ? { ...m, is_deleted: true } : m));
           break;
-
         case "presence":
           setContacts(prev => prev.map(c => c.phone_number === data.user ? { ...c, is_online: Boolean(data.online) } : c));
           break;
@@ -314,21 +299,17 @@ export default function CipherChat() {
           setCallState("incoming");
           pendingRemoteDescriptionRef.current = data.sdp as RTCSessionDescriptionInit;
           break;
-
         case "call_answer":
           if (peerConnectionRef.current) {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp as RTCSessionDescriptionInit));
             setCallState("connected");
           }
           break;
-
         case "ice_candidate":
-          // FIX: was incorrectly checking `?.setRemoteDescription` property
-          if (peerConnectionRef.current) {
+          if (peerConnectionRef.current?.setRemoteDescription) {
             await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate as RTCIceCandidateInit));
           }
           break;
-
         case "call_end":
         case "call_reject":
           endCall(false);
@@ -337,7 +318,9 @@ export default function CipherChat() {
     };
   }, [token, currentUser, endCall]);
 
-  useEffect(() => { initWSRef.current = initWS; }, [initWS]);
+  useEffect(() => {
+    initWSRef.current = initWS;
+  }, [initWS]);
 
   useEffect(() => {
     if (token) {
@@ -351,7 +334,7 @@ export default function CipherChat() {
     };
   }, [token, loadContacts, loadGroups, initWS]);
 
-  // ─── Authentication ─────────────────────────────────────────────────────────
+  // ─── Authentication ───────────────────────────────────────────────────────────
   const sendOTP = async () => {
     setAuthError(""); setAuthLoading(true);
     try {
@@ -372,6 +355,7 @@ export default function CipherChat() {
       setCurrentUser(phoneNumber.trim());
       localStorage.setItem("chat_token", data.access_token);
       localStorage.setItem("chat_user", phoneNumber.trim());
+
       if ("Notification" in window) Notification.requestPermission();
     } catch (e) { setAuthError(errorMessage(e)); }
     finally { setAuthLoading(false); }
@@ -389,7 +373,7 @@ export default function CipherChat() {
     setActiveChat(chat);
     if (messagesCache.current[chat.id]) {
       setMessages(messagesCache.current[chat.id]);
-      setTimeout(() => scrollBottom(), 10);
+      setTimeout(scrollBottom, 10);
     } else {
       setMessages([]);
     }
@@ -406,6 +390,7 @@ export default function CipherChat() {
     setInputMsg(""); setShowEmojis(false);
 
     const { type, id } = activeChat;
+
     const optimisticMsg: Message = {
       id: `temp-${Date.now()}-${Math.random()}`,
       user: currentUser,
@@ -419,7 +404,7 @@ export default function CipherChat() {
       messagesCache.current[id] = next;
       return next;
     });
-    setTimeout(() => scrollBottom(true), 50);
+    setTimeout(scrollBottom, 50);
 
     wsRef.current.send(JSON.stringify(type === "user"
       ? { type: "direct_message", target_user: id, content: text, message_type: "text" }
@@ -458,22 +443,36 @@ export default function CipherChat() {
       if (!res.ok) { alert("Upload failed"); return; }
       const data = await res.json();
 
+      // Identify the precise content type
       const isImg = data.content_type?.startsWith("image");
       const isAud = data.content_type?.startsWith("audio");
       const isVid = data.content_type?.startsWith("video");
       const isPdf = data.content_type === "application/pdf";
 
-      const tag = isImg ? `[IMAGE]${data.url}` : isAud ? `[AUDIO]${data.url}` : isVid ? `[VIDEO]${data.url}` : isPdf ? `[PDF]${data.url}` : `[FILE]${data.url}`;
+      // Assign the correct inline tag
+      const tag = isImg ? `[IMAGE]${data.url}`
+        : isAud ? `[AUDIO]${data.url}`
+          : isVid ? `[VIDEO]${data.url}`
+            : isPdf ? `[PDF]${data.url}`
+              : `[FILE]${data.url}`;
+
       const msgType = isImg ? "image" : isAud ? "audio" : isVid ? "video" : isPdf ? "pdf" : "file";
       const { type, id } = activeChat;
 
       const optimisticMsg: Message = {
         id: `temp-${Date.now()}-${Math.random()}`,
-        user: currentUser, content: tag, timestamp: new Date().toISOString(),
+        user: currentUser,
+        content: tag,
+        timestamp: new Date().toISOString(),
         ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
       };
-      setMessages(prev => { const next = [...prev, optimisticMsg]; messagesCache.current[id] = next; return next; });
-      setTimeout(() => scrollBottom(true), 50);
+
+      setMessages(prev => {
+        const next = [...prev, optimisticMsg];
+        messagesCache.current[id] = next;
+        return next;
+      });
+      setTimeout(scrollBottom, 50);
 
       wsRef.current?.send(JSON.stringify(type === "user"
         ? { type: "direct_message", target_user: id, content: tag, message_type: msgType }
@@ -499,18 +498,28 @@ export default function CipherChat() {
       mr.ondataavailable = e => audioChunksRef.current.push(e.data);
       mr.onstop = async () => {
         const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-        const form = new FormData(); form.append("file", blob, "voice.webm");
+        const form = new FormData();
+        form.append("file", blob, "voice.webm");
+
         const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
         const data = await res.json();
         const tag = `[AUDIO]${data.url}`;
         const { type, id } = activeChat;
+
         const optimisticMsg: Message = {
           id: `temp-${Date.now()}-${Math.random()}`,
-          user: currentUser, content: tag, timestamp: new Date().toISOString(),
+          user: currentUser,
+          content: tag,
+          timestamp: new Date().toISOString(),
           ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
         };
-        setMessages(prev => { const next = [...prev, optimisticMsg]; messagesCache.current[id] = next; return next; });
-        setTimeout(() => scrollBottom(true), 50);
+        setMessages(prev => {
+          const next = [...prev, optimisticMsg];
+          messagesCache.current[id] = next;
+          return next;
+        });
+        setTimeout(scrollBottom, 50);
+
         wsRef.current?.send(JSON.stringify(type === "user"
           ? { type: "direct_message", target_user: id, content: tag, message_type: "audio" }
           : { type: "group_message", group_id: id, content: tag, message_type: "audio" }));
@@ -520,7 +529,7 @@ export default function CipherChat() {
   };
 
   // ─── WebRTC ──────────────────────────────────────────────────────────────────
-  const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }, { urls: "stun:stun1.l.google.com:19302" }] };
+  const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
   const setupWebRTC = async (targetUser: string) => {
     const localStream = localStreamRef.current;
@@ -546,16 +555,20 @@ export default function CipherChat() {
     if (!activeChat || activeChat.type !== "user") return;
     const target = String(activeChat.id);
     try {
-      setIsVideoCall(video); setCallState("calling"); setCallPeer(target);
+      setIsVideoCall(video);
+      setCallState("calling");
+      setCallPeer(target);
+
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
 
       await setupWebRTC(target);
       const peerConnection = peerConnectionRef.current;
       const ws = wsRef.current;
-      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Not ready");
+      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Call connection is not ready");
       const offer = await peerConnection.createOffer();
       await peerConnection.setLocalDescription(offer);
+
       ws.send(JSON.stringify({ type: "call_offer", target_user: target, sdp: offer, isVideo: video }));
     } catch {
       alert("Could not access camera/microphone");
@@ -567,15 +580,19 @@ export default function CipherChat() {
     try {
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: isVideoCall, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
-      if (!callPeer || !pendingRemoteDescriptionRef.current) throw new Error("No offer");
+
+      if (!callPeer || !pendingRemoteDescriptionRef.current) throw new Error("Call offer is not available");
       await setupWebRTC(callPeer);
 
       const peerConnection = peerConnectionRef.current;
       const ws = wsRef.current;
-      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Not ready");
-      await peerConnection.setRemoteDescription(new RTCSessionDescription(pendingRemoteDescriptionRef.current));
+      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Call connection is not ready");
+      const offer = new RTCSessionDescription(pendingRemoteDescriptionRef.current);
+      await peerConnection.setRemoteDescription(offer);
+
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
+
       ws.send(JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer }));
       setCallState("connected");
     } catch { rejectCall(); }
@@ -595,7 +612,7 @@ export default function CipherChat() {
     if (d.toDateString() === today.toDateString()) return "Today";
     const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
     if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
-    return d.toLocaleDateString([], { weekday: "long", month: "short", day: "numeric" });
+    return d.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
   const groupedMessages = useMemo(() => {
@@ -608,139 +625,101 @@ export default function CipherChat() {
     return out;
   }, [messages]);
 
-  // ─── Render Bubble Content ───────────────────────────────────────────────────
-  const renderBubbleContent = (item: Message) => {
-    const { content } = item;
-    const isMine = item.user === currentUser;
-
-    if (content.startsWith("[IMAGE]")) {
-      const src = content.replace("[IMAGE]", "");
-      return (
-        <button className="msg-media-btn" onClick={() => { setViewerSrc(src); setViewerType("image"); }}>
-          <img src={src} alt="attachment" className="msg-img" />
-          <div className="msg-media-overlay"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0 1 19 12.55M5 19a10.94 10.94 0 0 1-1.72-1.49M13.99 5.08A10.93 10.93 0 0 1 12 5c-7 0-11 8-11 8a18.27 18.27 0 0 0 5.06 5.94"/></svg>View</div>
-        </button>
-      );
-    }
-    if (content.startsWith("[AUDIO]")) {
-      return <audio src={content.replace("[AUDIO]", "")} controls className="msg-audio" />;
-    }
-    if (content.startsWith("[VIDEO]")) {
-      const src = content.replace("[VIDEO]", "");
-      return (
-        <button className="msg-media-btn" onClick={() => { setViewerSrc(src); setViewerType("video"); }}>
-          <video src={src} className="msg-video-thumb" />
-          <div className="msg-play-btn"><svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg></div>
-        </button>
-      );
-    }
-    if (content.startsWith("[PDF]")) {
-      const src = content.replace("[PDF]", "");
-      return (
-        <button className="msg-file-box" onClick={() => { setViewerSrc(src); setViewerType("pdf"); }}>
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
-          <span>View PDF</span>
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 13v6a2 2 0 01-2 2H5a2 2 0 01-2-2V8a2 2 0 012-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
-        </button>
-      );
-    }
-    if (content.startsWith("[FILE]")) {
-      const src = content.replace("[FILE]", "");
-      const name = src.split("/").pop() || "file";
-      return (
-        <a href={src} target="_blank" rel="noreferrer" className="msg-file-box">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-          <span>{name}</span>
-        </a>
-      );
-    }
-    return <span className="msg-text">{renderText(content, isMine)}</span>;
-  };
-
   if (!isMounted) return (
-    <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center" }}>
-      <div className="boot-loader">
-        <div className="boot-logo">
-          <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-            <path d="M4 8C4 5.79 5.79 4 8 4H20C22.21 4 24 5.79 24 8V16C24 18.21 22.21 20 20 20H15L9 24V20H8C5.79 20 4 18.21 4 16V8Z" fill="currentColor"/>
-          </svg>
-        </div>
-        <div className="boot-dots"><span></span><span></span><span></span></div>
-      </div>
+    <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", width: "100vw", height: "100vh" }}>
+      <div className="spinner" style={{ width: 40, height: 40, border: "3px solid rgba(255,255,255,0.1)", borderTopColor: "var(--gold)" }}></div>
     </div>
   );
 
   // ─── RENDER ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
-      {/* Animated background orbs */}
-      <div className="bg-orb bg-orb-1"></div>
-      <div className="bg-orb bg-orb-2"></div>
-      <div className="bg-orb bg-orb-3"></div>
+      {/* ADDED ANIMATIONS */}
+      <style>{`
+        @keyframes slideUpFade {
+          from { opacity: 0; transform: translateY(10px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes pulseRing {
+          0% { box-shadow: 0 0 0 0 rgba(100, 100, 255, 0.4); transform: scale(1); }
+          50% { box-shadow: 0 0 0 15px rgba(100, 100, 255, 0); transform: scale(1.05); }
+          100% { box-shadow: 0 0 0 0 rgba(100, 100, 255, 0); transform: scale(1); }
+        }
+        .msg-row { animation: slideUpFade 0.3s ease-out forwards; }
+        .sb-item { transition: background 0.2s, transform 0.1s; }
+        .sb-item:active { transform: scale(0.98); }
+        .call-hdr-btn { transition: transform 0.2s, color 0.2s; }
+        .call-hdr-btn:hover { transform: scale(1.1); color: var(--gold, #ffcc00); }
+        .pulse-anim { animation: pulseRing 2s infinite; }
+        .msg-img, .msg-video { transition: transform 0.2s; cursor: pointer; }
+        .msg-img:hover, .msg-video:hover { transform: scale(1.02); }
+      `}</style>
 
       {!isAuth ? (
-        /* ── Auth Screen ── */
         <div className="auth-screen">
+          <div className="auth-glow auth-glow-1"></div>
+          <div className="auth-glow auth-glow-2"></div>
           <div className="auth-left">
             <div className="brand">
               <div className="brand-icon">
                 <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
-                  <path d="M4 8C4 5.79 5.79 4 8 4H20C22.21 4 24 5.79 24 8V16C24 18.21 22.21 20 20 20H15L9 24V20H8C5.79 20 4 18.21 4 16V8Z" fill="currentColor"/>
-                  <circle cx="10" cy="12" r="1.5" fill="rgba(0,0,0,0.45)"/>
-                  <circle cx="14" cy="12" r="1.5" fill="rgba(0,0,0,0.45)"/>
-                  <circle cx="18" cy="12" r="1.5" fill="rgba(0,0,0,0.45)"/>
+                  <path d="M4 8C4 5.79 5.79 4 8 4H20C22.21 4 24 5.79 24 8V16C24 18.21 22.21 20 20 20H15L9 24V20H8C5.79 20 4 18.21 4 16V8Z" fill="currentColor" />
+                  <circle cx="10" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" /><circle cx="14" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" /><circle cx="18" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" />
                 </svg>
               </div>
               <span className="brand-name">Cipher</span>
             </div>
             <div className="auth-hero">
-              <h1>Connect.<br/>Fast.<br/><em>Beautifully.</em></h1>
-              <p>Real-time messaging built for speed, reliability, and delight.</p>
+              <h1>Connect.<br />Fast.<br /><em>Simple.</em></h1>
+              <p>Real-time messaging platform built for speed and reliability.</p>
             </div>
-            <div className="auth-features">
-              <div className="auth-feat"><div className="feat-icon feat-icon--gold">⚡</div><div><strong>Instant</strong><span>Sub-millisecond delivery</span></div></div>
-              <div className="auth-feat"><div className="feat-icon feat-icon--purple">💬</div><div><strong>Real-time</strong><span>Live typing & presence</span></div></div>
-              <div className="auth-feat"><div className="feat-icon feat-icon--green">📞</div><div><strong>Voice & Video</strong><span>WebRTC powered calls</span></div></div>
+            <div className="auth-pills">
+              <span className="a-pill a-pill--gold">⚡ Fast</span>
+              <span className="a-pill">💬 Real-time</span>
+              <span className="a-pill">📱 Mobile-ready</span>
             </div>
           </div>
 
           <div className="auth-right">
             <div className="auth-card">
-              <div className="auth-card-glow"></div>
               {!otpSent ? (
                 <>
-                  <h2 className="ac-title">Welcome back</h2>
-                  <p className="ac-sub">Enter your phone number to continue</p>
+                  <h2 className="ac-title">Sign in</h2>
+                  <p className="ac-sub">Enter your phone number to get a one-time code</p>
                   <div className="ac-field">
                     <label>Phone number</label>
                     <div className="ac-input-wrap">
-                      <svg className="ac-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z"/></svg>
-                      <input value={phoneNumber} onChange={e => setPhoneNumber(e.target.value)} onKeyDown={e => e.key === "Enter" && sendOTP()} type="tel" placeholder="+91 98765 43210" className="ac-input"/>
+                      <svg className="ac-icon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                      <input value={phoneNumber} onChange={e => setPhoneNumber(e.target.value)} onKeyDown={e => e.key === "Enter" && sendOTP()} type="tel" placeholder="+91 98765 43210" className="ac-input" />
                     </div>
                   </div>
-                  <button disabled={authLoading || !phoneNumber.trim()} onClick={sendOTP} className="ac-btn">
-                    {authLoading ? <><span className="spinner"></span>Sending…</> : <>Get verification code <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg></>}
+                  <button disabled={authLoading} onClick={sendOTP} className="ac-btn">
+                    {authLoading && <span className="spinner"></span>}
+                    {authLoading ? "Sending…" : "Get verification code"}
+                    {!authLoading && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7" /></svg>}
                   </button>
                 </>
               ) : (
                 <>
                   <button onClick={() => setOtpSent(false)} className="ac-back">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 5l-7 7 7 7"/></svg> Back
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 5l-7 7 7 7" /></svg> Back
                   </button>
-                  <h2 className="ac-title">Enter code</h2>
+                  <h2 className="ac-title">Verify code</h2>
                   <p className="ac-sub">6-digit code sent to <strong>{phoneNumber}</strong></p>
                   <div className="ac-field">
                     <label>Verification code</label>
-                    <input value={otp} onChange={e => setOtp(e.target.value)} onKeyDown={e => e.key === "Enter" && verifyOTP()} type="text" inputMode="numeric" placeholder="000000" maxLength={6} className="ac-input ac-otp"/>
+                    <input value={otp} onChange={e => setOtp(e.target.value)} onKeyDown={e => e.key === "Enter" && verifyOTP()} type="text" placeholder="000000" maxLength={6} className="ac-input ac-otp" />
                   </div>
-                  <button disabled={authLoading || otp.length < 6} onClick={verifyOTP} className="ac-btn">
-                    {authLoading ? <><span className="spinner"></span>Verifying…</> : <>Verify & sign in <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7"/></svg></>}
+                  <button disabled={authLoading} onClick={verifyOTP} className="ac-btn">
+                    {authLoading && <span className="spinner"></span>}
+                    {authLoading ? "Verifying…" : "Verify & sign in"}
+                    {!authLoading && <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M5 12h14M12 5l7 7-7 7" /></svg>}
                   </button>
                 </>
               )}
               {authError && (
                 <div className="ac-error">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></svg>
                   {authError}
                 </div>
               )}
@@ -749,159 +728,161 @@ export default function CipherChat() {
         </div>
       ) : (
         <div className={`shell ${activeChat ? "chat-active" : ""}`}>
-          {/* ── Sidebar ── */}
+          {/* Sidebar */}
           <aside className="sidebar">
-            <div className="sb-top">
-              <div className="sb-identity">
-                <div className="sb-id-avatar">{(currentUser[0] || "?").toUpperCase()}</div>
-                <div className="sb-id-info">
-                  <span className="sb-id-name">{currentUser}</span>
-                  <span className="sb-id-status"><span className="status-dot status-dot--on"></span>Online</span>
-                </div>
-                <button onClick={logout} className="logout-icon-btn" title="Sign out">
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg>
-                </button>
+            <div className="sb-identity">
+              <div className="sb-id-avatar">{(currentUser?.[0] || "?").toUpperCase()}</div>
+              <div className="sb-id-info">
+                <span className="sb-id-name">{currentUser}</span>
+                <span className="sb-id-status"><span className="green-dot"></span>Online</span>
               </div>
-
-              <div className="sb-profile-toggle" onClick={() => setShowProfile(!showProfile)}>
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
-                Edit Profile
-                <svg className={`chevron ${showProfile ? "chevron--up" : ""}`} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6,9 12,15 18,9"/></svg>
-              </div>
-
-              {showProfile && (
-                <div className="sb-profile-form drop">
-                  <input value={editDisplayName} onChange={e => setEditDisplayName(e.target.value)} placeholder="Display name…" className="sb-field"/>
-                  <button onClick={async () => { await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ display_name: editDisplayName }) }); setShowProfile(false); }} className="sb-save-btn">Save changes</button>
-                </div>
-              )}
             </div>
 
-            <div className="sb-scroll">
-              {/* Direct Messages */}
-              <div className="sb-section">
-                <div className="sb-section-hdr">
-                  <div className="sb-section-label">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
-                    Messages
-                    {contacts.length > 0 && <span className="section-count">{contacts.length}</span>}
-                  </div>
-                  <button onClick={() => setShowNewContact(!showNewContact)} className={`sb-add-btn ${showNewContact ? "active" : ""}`} title="New chat">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
-                  </button>
-                </div>
+            <button onClick={logout} className="logout-bar">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" /></svg> Sign Out
+            </button>
 
-                {showNewContact && (
-                  <div className="sb-add-form drop">
-                    <input value={newContactPhone} onChange={e => setNewContactPhone(e.target.value)}
-                      onKeyDown={e => { if (e.key === "Enter" && newContactPhone.trim()) { apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) }).then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); }); } }}
-                      placeholder="+91 phone number…" className="sb-field" autoFocus/>
-                    <button onClick={() => { if (!newContactPhone.trim()) return; apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) }).then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); }); }} className="sb-go-btn">Start chat →</button>
-                  </div>
-                )}
-
-                <div className="sb-list">
-                  {contacts.length === 0 && <div className="sb-empty">No contacts yet</div>}
-                  {contacts.map(c => (
-                    <button key={c.phone_number} onClick={() => openChat({ type: "user", id: c.phone_number, name: c.nickname || c.display_name || c.phone_number })} className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}>
-                      <div className="sb-av">
-                        {(c.display_name || c.phone_number)[0].toUpperCase()}
-                        <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
-                      </div>
-                      <div className="sb-item-body">
-                        <span className="sb-item-name">{c.nickname || c.display_name || c.phone_number}</span>
-                        <span className={`sb-item-sub ${c.is_online ? "online" : ""}`}>{c.is_online ? "● Online" : "○ Offline"}</span>
-                      </div>
-                      {unread[c.phone_number] > 0 && <span className="unread">{unread[c.phone_number]}</span>}
-                    </button>
-                  ))}
-                </div>
+            <div className="sb-profile-toggle" onClick={() => setShowProfile(!showProfile)}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" /></svg> Edit Profile
+              <svg className={`chevron ${showProfile ? "chevron--up" : ""}`} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6,9 12,15 18,9" /></svg>
+            </div>
+            {showProfile && (
+              <div className="sb-profile-form drop">
+                <input value={editDisplayName} onChange={e => setEditDisplayName(e.target.value)} placeholder="Display name…" className="sb-field" />
+                <button onClick={async () => { await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ display_name: editDisplayName }) }); setShowProfile(false); }} className="sb-save-btn">Save</button>
               </div>
+            )}
 
-              <div className="sb-divider"></div>
+            <div className="sb-divider"></div>
 
-              {/* Groups */}
-              <div className="sb-section">
-                <div className="sb-section-hdr">
-                  <div className="sb-section-label">
-                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75"/></svg>
-                    Groups
-                    {groups.length > 0 && <span className="section-count">{groups.length}</span>}
-                  </div>
-                  <button onClick={() => setShowNewGroup(!showNewGroup)} className={`sb-add-btn ${showNewGroup ? "active" : ""}`} title="New group">
-                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+            <div className="sb-section">
+              <div className="sb-section-hdr">
+                <div className="sb-section-label">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg> Direct Messages
+                </div>
+                <button onClick={() => setShowNewContact(!showNewContact)} className={`sb-add-btn ${showNewContact ? "active" : ""}`} title="New chat">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </button>
+              </div>
+              {showNewContact && (
+                <div className="sb-add-form drop">
+                  <input
+                    value={newContactPhone}
+                    onChange={e => setNewContactPhone(e.target.value)}
+                    onKeyDown={e => {
+                      if (e.key === "Enter") {
+                        apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) })
+                          .then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); });
+                      }
+                    }}
+                    placeholder="+91 phone number…"
+                    className="sb-field"
+                    autoFocus
+                  />
+                  <button
+                    onClick={() => {
+                      apiFetch("/contacts", { method: "POST", body: JSON.stringify({ contact_phone: newContactPhone.trim() }) })
+                        .then(() => { loadContacts(); openChat({ type: "user", id: newContactPhone.trim(), name: newContactPhone.trim() }); setNewContactPhone(""); setShowNewContact(false); });
+                    }}
+                    className="sb-go-btn"
+                  >
+                    Start chat
                   </button>
                 </div>
+              )}
+              <div className="sb-list">
+                {contacts.map(c => (
+                  <button key={c.phone_number} onClick={() => openChat({ type: "user", id: c.phone_number, name: c.nickname || c.display_name || c.phone_number })} className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}>
+                    {/* CRASH FIX: Optional chaining and fallback applied here */}
+                    <div className="sb-av">
+                      {(c.nickname || c.display_name || c.phone_number)?.[0]?.toUpperCase() || "?"}
+                      <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
+                    </div>
+                    <div className="sb-item-body">
+                      <span className="sb-item-name">{c.nickname || c.display_name || c.phone_number}</span>
+                      <span className={`sb-item-status ${c.is_online ? "online" : ""}`}>{c.is_online ? "● Online" : "○ Offline"}</span>
+                    </div>
+                    {unread[c.phone_number] > 0 && <span className="unread">{unread[c.phone_number]}</span>}
+                  </button>
+                ))}
+              </div>
+            </div>
 
-                {showNewGroup && (
-                  <div className="sb-add-form drop">
-                    <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)} placeholder="Group name *" className="sb-field"/>
-                    <input value={newGroupMembers} onChange={e => setNewGroupMembers(e.target.value)} placeholder="Members (comma-separated) *" className="sb-field"/>
-                    <input value={newGroupDesc} onChange={e => setNewGroupDesc(e.target.value)} placeholder="Description (optional)" className="sb-field"/>
-                    <button onClick={() => {
+            <div className="sb-divider"></div>
+
+            <div className="sb-section">
+              <div className="sb-section-hdr">
+                <div className="sb-section-label">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2" /><circle cx="9" cy="7" r="4" /><path d="M23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" /></svg> Groups
+                </div>
+                <button onClick={() => setShowNewGroup(!showNewGroup)} className={`sb-add-btn ${showNewGroup ? "active" : ""}`} title="New group">
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg>
+                </button>
+              </div>
+              {showNewGroup && (
+                <div className="sb-add-form drop">
+                  <input value={newGroupName} onChange={e => setNewGroupName(e.target.value)} placeholder="Group name *" className="sb-field" />
+                  <input value={newGroupMembers} onChange={e => setNewGroupMembers(e.target.value)} placeholder="Members (comma-separated) *" className="sb-field" />
+                  <input value={newGroupDesc} onChange={e => setNewGroupDesc(e.target.value)} placeholder="Description (optional)" className="sb-field" />
+                  <button
+                    onClick={() => {
                       const members = newGroupMembers.trim().split(",").map(s => s.trim()).filter(Boolean);
                       if (!newGroupName.trim() || !members.length) return;
                       apiFetch("/groups", { method: "POST", body: JSON.stringify({ name: newGroupName.trim(), description: newGroupDesc, members }) })
                         .then(() => { setNewGroupName(""); setNewGroupDesc(""); setNewGroupMembers(""); setShowNewGroup(false); loadGroups(); });
-                    }} className="sb-go-btn purple">Create group →</button>
-                  </div>
-                )}
-
-                <div className="sb-list">
-                  {groups.length === 0 && <div className="sb-empty">No groups yet</div>}
-                  {groups.map(g => (
-                    <button key={g.id} onClick={() => openChat({ type: "group", id: g.id, name: g.name })} className={`sb-item ${activeChat?.id === g.id ? "sb-item--active-group" : ""}`}>
-                      <div className="sb-av sb-av--group">{g.name[0].toUpperCase()}</div>
-                      <div className="sb-item-body">
-                        <span className="sb-item-name">{g.name}</span>
-                        <span className="sb-item-sub">{g.members.length} members</span>
-                      </div>
-                      {unread[g.id] > 0 && <span className="unread unread--purple">{unread[g.id]}</span>}
-                    </button>
-                  ))}
+                    }}
+                    className="sb-go-btn purple"
+                  >
+                    Create group
+                  </button>
                 </div>
+              )}
+              <div className="sb-list">
+                {groups.map(g => (
+                  <button key={g.id} onClick={() => openChat({ type: "group", id: g.id, name: g.name })} className={`sb-item ${activeChat?.id === g.id ? "sb-item--active-group" : ""}`}>
+                    {/* CRASH FIX: Optional chaining and fallback applied here */}
+                    <div className="sb-av sb-av--group">{g.name?.[0]?.toUpperCase() || "?"}</div>
+                    <div className="sb-item-body">
+                      <span className="sb-item-name">{g.name}</span>
+                      <span className="sb-item-status">{g.members.length} members</span>
+                    </div>
+                    {unread[g.id] > 0 && <span className="unread unread--purple">{unread[g.id]}</span>}
+                  </button>
+                ))}
               </div>
             </div>
           </aside>
 
-          {/* ── Chat Main ── */}
+          {/* Chat Main */}
           <main className="chat">
             {!activeChat ? (
               <div className="empty-state">
-                <div className="empty-icon-wrap">
-                  <div className="empty-ring r1"></div>
-                  <div className="empty-ring r2"></div>
-                  <div className="empty-ring r3"></div>
-                  <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ position: "relative", zIndex: 1 }}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+                <div className="empty-rings">
+                  <div className="ring r1"></div><div className="ring r2"></div><div className="ring r3"></div>
+                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ position: "relative", zIndex: 1 }}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
                 </div>
-                <h3>Select a conversation</h3>
-                <p>Choose a contact or group from the sidebar to start messaging</p>
-                <div className="empty-hint">
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
-                  All messages are end-to-end encrypted
-                </div>
+                <h3>No conversation open</h3>
+                <p>Select a contact or group from the sidebar to start messaging</p>
               </div>
             ) : (
               <>
-                {/* Chat Header */}
                 <header className="chat-hdr">
                   <div className="chat-hdr-left">
                     <button className="mobile-back-btn" onClick={() => setActiveChat(null)}>
-                      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M15 18l-6-6 6-6"/></svg>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
                     </button>
+                    {/* CRASH FIX: Optional chaining and fallback applied here */}
                     <div className={`hdr-av ${activeChat.type === "group" ? "hdr-av--group" : "hdr-av--dm"}`}>
-                      {activeChat.name[0].toUpperCase()}
-                      {activeChat.type === "user" && (
-                        <span className={`hdr-pres ${contacts.find(c => c.phone_number === activeChat.id)?.is_online ? "hdr-pres--on" : ""}`}></span>
-                      )}
+                      {activeChat.name?.[0]?.toUpperCase() || "?"}
                     </div>
                     <div className="hdr-info">
                       <span className="hdr-name">{activeChat.name}</span>
                       <span className="hdr-meta">
                         {activeChat.type === "user" ? (
-                          contacts.find(c => c.phone_number === activeChat.id)?.is_online ? (
-                            <span className="hdr-online">● Online</span>
-                          ) : "Offline"
+                          <>
+                            <span className={`hdr-dot ${contacts.find(c => c.phone_number === activeChat.id)?.is_online ? "hdr-dot--on" : ""}`}></span>
+                            {contacts.find(c => c.phone_number === activeChat.id)?.is_online ? "Online" : "Offline"}
+                          </>
                         ) : (
                           <>{groups.find(g => g.id === activeChat.id)?.members.length || "?"} members</>
                         )}
@@ -912,11 +893,11 @@ export default function CipherChat() {
                   <div className="hdr-right">
                     {activeChat.type === "user" && (
                       <>
-                        <button onClick={() => startCall(false)} className="tool-btn" title="Voice Call">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z"/></svg>
+                        <button onClick={() => startCall(false)} className="tool-btn call-hdr-btn" title="Voice Call">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                         </button>
-                        <button onClick={() => startCall(true)} className="tool-btn" title="Video Call">
-                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>
+                        <button onClick={() => startCall(true)} className="tool-btn call-hdr-btn" title="Video Call">
+                          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
                         </button>
                       </>
                     )}
@@ -926,12 +907,11 @@ export default function CipherChat() {
                 {hasMore && (
                   <div className="load-more-row">
                     <button onClick={() => messages.length && loadHistory(activeChat, messages[0].id)} disabled={loadingMore} className="load-more-btn">
-                      {loadingMore ? <><span className="mini-spin"></span>Loading…</> : "↑ Load older messages"}
+                      {loadingMore ? "Loading…" : "↑ Load older messages"}
                     </button>
                   </div>
                 )}
 
-                {/* Messages */}
                 <div ref={msgListRef} className="msg-list">
                   {groupedMessages.map((item, idx) => (
                     item.type === "divider" ? (
@@ -939,23 +919,32 @@ export default function CipherChat() {
                     ) : (
                       <div key={item.id} className={`msg-row ${item.user === currentUser ? "msg-mine" : "msg-theirs"}`}>
                         {item.is_deleted ? (
-                          <div className="msg-deleted">
-                            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
-                            Message deleted
-                          </div>
+                          <div className="msg-deleted">Message deleted</div>
                         ) : editingId === item.id ? (
                           <div className="edit-row">
-                            <input value={editingText} onChange={e => setEditingText(e.target.value)} onKeyDown={e => { if (e.key === "Enter") saveEdit(); if (e.key === "Escape") setEditingId(null); }} className="edit-field" autoFocus/>
-                            <button onClick={saveEdit} className="edit-save" title="Save">✓</button>
-                            <button onClick={() => setEditingId(null)} className="edit-discard" title="Cancel">✕</button>
+                            <input value={editingText} onChange={e => setEditingText(e.target.value)} onKeyDown={e => e.key === "Enter" && saveEdit()} onKeyUp={e => e.key === "Escape" && setEditingId(null)} className="edit-field" autoFocus />
+                            <button onClick={saveEdit} className="edit-save">✓</button>
+                            <button onClick={() => setEditingId(null)} className="edit-discard">✕</button>
                           </div>
                         ) : (
                           <div className="bw">
-                            {activeChat.type === "group" && item.user !== currentUser && (
-                              <span className="sender-name">{item.user}</span>
-                            )}
+                            {activeChat.type === "group" && item.user !== currentUser && <span className="sender-name">{item.user}</span>}
                             <div className={`bubble ${item.user === currentUser ? "mine" : "theirs"}`}>
-                              {renderBubbleContent(item)}
+                              {item.content.startsWith("[IMAGE]") ? (
+                                <img src={item.content.replace("[IMAGE]", "")} alt="attachment" className="msg-img" style={{ maxWidth: '100%', borderRadius: '8px' }} onClick={() => setViewFile({ url: item.content.replace("[IMAGE]", ""), type: "image" })} />
+                              ) : item.content.startsWith("[AUDIO]") ? (
+                                <audio src={item.content.replace("[AUDIO]", "")} controls className="msg-audio" style={{ maxWidth: '100%' }}></audio>
+                              ) : item.content.startsWith("[VIDEO]") ? (
+                                <video src={item.content.replace("[VIDEO]", "")} controls className="msg-video" style={{ maxWidth: '100%', borderRadius: '8px' }} onClick={() => setViewFile({ url: item.content.replace("[VIDEO]", ""), type: "video" })}></video>
+                              ) : item.content.startsWith("[PDF]") ? (
+                                <iframe src={item.content.replace("[PDF]", "")} className="msg-pdf" style={{ width: '100%', minHeight: '300px', border: 'none', borderRadius: '8px', backgroundColor: 'white' }} title="PDF attachment"></iframe>
+                              ) : item.content.startsWith("[FILE]") ? (
+                                <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">
+                                  Download file
+                                </a>
+                              ) : (
+                                <span className="msg-text">{item.content}</span>
+                              )}
 
                               <div className="msg-footer">
                                 <span className="msg-ts">{formatTime(item.timestamp)}</span>
@@ -963,25 +952,18 @@ export default function CipherChat() {
                                 {item.user === currentUser && activeChat.type === "user" && (
                                   <span className={`ticks ${item.is_read ? "ticks--read" : ""}`}>
                                     {item.is_read ? (
-                                      <svg width="16" height="10" viewBox="0 0 22 14" fill="none"><path d="M1 7L6 12L15 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/><path d="M8 7L13 12L22 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+                                      <svg width="14" height="9" viewBox="0 0 22 14" fill="none"><path d="M1 7L6 12L15 1" stroke="currentColor" strokeWidth="2" /><path d="M8 7L13 12L22 1" stroke="currentColor" strokeWidth="2" /></svg>
                                     ) : (
-                                      <svg width="12" height="10" viewBox="0 0 14 14" fill="none"><path d="M1 7L6 12L13 1" stroke="currentColor" strokeWidth="2" strokeLinecap="round"/></svg>
+                                      <svg width="10" height="9" viewBox="0 0 14 14" fill="none"><path d="M1 7L6 12L13 1" stroke="currentColor" strokeWidth="2" /></svg>
                                     )}
                                   </span>
                                 )}
                               </div>
 
-                              {/* FIX: Only show edit/delete for text messages */}
                               {item.user === currentUser && (
                                 <div className="bubble-actions">
-                                  {!isMediaMessage(item.content) && (
-                                    <button onClick={e => { e.stopPropagation(); setEditingId(item.id); setEditingText(item.content); }} title="Edit">
-                                      <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
-                                    </button>
-                                  )}
-                                  <button onClick={e => { e.stopPropagation(); deleteMsg(item.id); }} className="del-action" title="Delete">
-                                    <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a1 1 0 011-1h4a1 1 0 011 1v2"/></svg>
-                                  </button>
+                                  <button onClick={(e) => { e.stopPropagation(); setEditingId(item.id); setEditingText(item.content); }} title="Edit">✎</button>
+                                  <button onClick={(e) => { e.stopPropagation(); deleteMsg(item.id); }} className="del-action" title="Delete">🗑</button>
                                 </div>
                               )}
                             </div>
@@ -992,47 +974,23 @@ export default function CipherChat() {
                   ))}
                 </div>
 
-                {/* Typing indicator */}
                 <div className="typing-area">
-                  {isTyping && (
-                    <div className="typing-pill">
-                      <div className="typing-dots"><span></span><span></span><span></span></div>
-                      <span>{activeChat.name} is typing</span>
-                    </div>
-                  )}
+                  {isTyping && <div className="typing-pill fade"><span className="td"></span><span className="td"></span><span className="td"></span><span>{activeChat.name} is typing…</span></div>}
                 </div>
 
-                {/* Emoji Picker */}
                 {showEmojis && (
-                  <div className="emoji-picker">
+                  <div className="emoji-picker pop">
                     {emojis.map(e => <button key={e} onClick={() => setInputMsg(prev => prev + e)} className="emoji-btn">{e}</button>)}
                   </div>
                 )}
 
-                {/* Input Bar */}
                 <div className="input-bar">
-                  <input type="file" ref={fileInputRef} onChange={handleFile} accept="image/*,audio/*,video/mp4,.pdf" style={{ display: "none" }}/>
-                  <button onClick={() => setShowEmojis(!showEmojis)} className={`tool-btn ${showEmojis ? "tool-btn--on" : ""}`} title="Emoji">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10"/><path d="M8 13s1.5 2 4 2 4-2 4-2"/><line x1="9" y1="9" x2="9.01" y2="9"/><line x1="15" y1="9" x2="15.01" y2="9"/></svg>
-                  </button>
-                  <button onClick={() => fileInputRef.current?.click()} className="tool-btn" title="Attach file">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"/></svg>
-                  </button>
-                  <button onClick={toggleRecording} className={`tool-btn ${isRecording ? "tool-btn--rec" : ""}`} title={isRecording ? "Stop recording" : "Record voice"}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
-                    {isRecording && <span className="rec-dot"></span>}
-                  </button>
-                  <input
-                    value={inputMsg}
-                    onChange={handleTyping}
-                    onKeyDown={e => e.key === "Enter" && !e.shiftKey && sendMessage()}
-                    placeholder="Type a message…"
-                    className="msg-input"
-                    disabled={isRecording}
-                  />
-                  <button onClick={sendMessage} disabled={isRecording || !inputMsg.trim()} className="send-btn" title="Send">
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
-                  </button>
+                  <input type="file" ref={fileInputRef} onChange={handleFile} accept="image/*,audio/*,video/mp4,.pdf" style={{ display: "none" }} />
+                  <button onClick={() => setShowEmojis(!showEmojis)} className={`tool-btn ${showEmojis ? "tool-btn--on" : ""}`}>😀</button>
+                  <button onClick={() => fileInputRef.current?.click()} className="tool-btn">📎</button>
+                  <button onClick={toggleRecording} className={`tool-btn ${isRecording ? "tool-btn--rec" : ""}`}>🎤{isRecording && <span className="rec-dot"></span>}</button>
+                  <input value={inputMsg} onChange={handleTyping} onKeyDown={e => e.key === "Enter" && sendMessage()} placeholder="Type a message…" className="msg-input" disabled={isRecording} />
+                  <button onClick={sendMessage} disabled={isRecording || !inputMsg.trim()} className="send-btn">➤</button>
                 </div>
               </>
             )}
@@ -1040,30 +998,14 @@ export default function CipherChat() {
         </div>
       )}
 
-      {/* ── File Viewer Modal ── */}
-      {viewerSrc && viewerType && (
-        <div className="file-viewer-overlay" onClick={() => setViewerSrc(null)}>
-          <button className="viewer-close" onClick={() => setViewerSrc(null)}>
-            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
-          </button>
-          <div className="viewer-inner" onClick={e => e.stopPropagation()}>
-            {viewerType === "image" && <img src={viewerSrc} alt="preview" className="viewer-img"/>}
-            {viewerType === "video" && <video src={viewerSrc} controls autoPlay className="viewer-video"/>}
-            {viewerType === "pdf" && <iframe src={viewerSrc} className="viewer-pdf" title="PDF"/>}
-          </div>
-        </div>
-      )}
-
-      {/* ── WebRTC Call Overlay ── */}
+      {/* WebRTC Call Overlay */}
       {callState !== "idle" && (
         <div className="call-overlay">
           <div className={`call-modal ${isVideoCall && callState === "connected" ? "video-active" : ""}`}>
-            {isVideoCall && (callState === "connected" || callState === "calling") && (
-              <div className="video-container">
-                <video ref={remoteVideoRef} className="remote-video" autoPlay playsInline></video>
-                <video ref={localVideoRef} className="local-video" autoPlay playsInline muted></video>
-              </div>
-            )}
+            <div style={{ display: (isVideoCall && (callState === "connected" || callState === "calling")) ? "block" : "none" }} className="video-container">
+              <video ref={remoteVideoRef} className="remote-video" autoPlay playsInline></video>
+              <video ref={localVideoRef} className="local-video" autoPlay playsInline muted></video>
+            </div>
 
             {(!isVideoCall || callState !== "connected") && (
               <div className="call-info">
@@ -1072,9 +1014,7 @@ export default function CipherChat() {
                 </div>
                 <h2 className="call-name">{callPeer}</h2>
                 <p className="call-status">
-                  {callState === "incoming" ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call…`
-                    : callState === "calling" ? "Calling…"
-                    : "Connected"}
+                  {callState === "incoming" ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...` : callState === "calling" ? "Calling..." : "Connected"}
                 </p>
               </div>
             )}
@@ -1083,18 +1023,29 @@ export default function CipherChat() {
               {callState === "incoming" ? (
                 <>
                   <button onClick={rejectCall} className="call-btn btn-reject" title="Reject">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
                   <button onClick={acceptCall} className="call-btn btn-accept" title="Accept">
-                    <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z"/></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
                 </>
               ) : (
                 <button onClick={() => endCall(true)} className="call-btn btn-end" title="End Call">
-                  <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="1" y1="1" x2="23" y2="23"/><path d="M16.72 11.06A10.94 10.94 0 0119 12.55M5 19a10.94 10.94 0 01-1.72-1.49M13.99 5.08A10.93 10.93 0 0112 5c-7 0-11 8-11 8a18.27 18.27 0 005.06 5.94M9.53 14.48A10.24 10.24 0 009 12c0-7 8-11 8-11a18.27 18.27 0 011.94 5.06"/></svg>
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                 </button>
               )}
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* File Viewer Overlay */}
+      {viewFile && (
+        <div className="file-viewer-overlay" onClick={() => setViewFile(null)}>
+          <button className="close-viewer" onClick={() => setViewFile(null)}>✕</button>
+          <div className="viewer-content" onClick={e => e.stopPropagation()}>
+            {viewFile.type === "image" && <img src={viewFile.url} alt="attachment" />}
+            {viewFile.type === "video" && <video src={viewFile.url} controls autoPlay />}
           </div>
         </div>
       )}
