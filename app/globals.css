@@ -1293,3 +1293,30 @@ input {
 
   .bw { max-width: 90%; }
 }
+.avatar-edit-section {
+  margin-bottom: 1rem;
+  text-align: center;
+}
+
+.avatar-upload-btn {
+  display: inline-block;
+  width: 100%;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px dashed var(--surface-border);
+  border-radius: 8px;
+  color: var(--text-main);
+  font-size: 0.9rem;
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.avatar-upload-btn:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--gold);
+}
+
+.avatar-upload-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
