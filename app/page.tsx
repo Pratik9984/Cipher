@@ -554,7 +554,13 @@ export default function CipherChat() {
   const startCall = async (video = true) => {
     if (!activeChat || activeChat.type !== "user") return;
     const target = String(activeChat.id);
+    
     try {
+      // FIX: Aggressively kill any zombie media streams before requesting new ones
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
       setIsVideoCall(video);
       setCallState("calling");
       setCallPeer(target);
@@ -570,14 +576,20 @@ export default function CipherChat() {
       await peerConnection.setLocalDescription(offer);
 
       ws.send(JSON.stringify({ type: "call_offer", target_user: target, sdp: offer, isVideo: video }));
-    } catch {
-      alert("Could not access camera/microphone");
+    } catch (err: any) {
+      console.error("Media access failed:", err);
+      alert(`Could not access camera/microphone. Reason: ${err.name || err.message}`);
       endCall(false);
     }
   };
 
   const acceptCall = async () => {
     try {
+      // FIX: Aggressively kill any zombie media streams before requesting new ones
+      if (localStreamRef.current) {
+        localStreamRef.current.getTracks().forEach(track => track.stop());
+      }
+
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: isVideoCall, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
 
@@ -595,7 +607,10 @@ export default function CipherChat() {
 
       ws.send(JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer }));
       setCallState("connected");
-    } catch { rejectCall(); }
+    } catch (err: any) { 
+      console.error("Accept call media failed:", err);
+      rejectCall(); 
+    }
   };
 
   const rejectCall = () => {
@@ -772,7 +787,6 @@ export default function CipherChat() {
               <div className="sb-list">
                 {contacts.map(c => (
                   <button key={c.phone_number} onClick={() => openChat({ type: "user", id: c.phone_number, name: c.nickname || c.display_name || c.phone_number })} className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}>
-                    {/* CRASH FIX: Optional chaining and fallback applied here */}
                     <div className="sb-av">
                       {(c.nickname || c.display_name || c.phone_number)?.[0]?.toUpperCase() || "?"}
                       <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
@@ -819,7 +833,6 @@ export default function CipherChat() {
               <div className="sb-list">
                 {groups.map(g => (
                   <button key={g.id} onClick={() => openChat({ type: "group", id: g.id, name: g.name })} className={`sb-item ${activeChat?.id === g.id ? "sb-item--active-group" : ""}`}>
-                    {/* CRASH FIX: Optional chaining and fallback applied here */}
                     <div className="sb-av sb-av--group">{g.name?.[0]?.toUpperCase() || "?"}</div>
                     <div className="sb-item-body">
                       <span className="sb-item-name">{g.name}</span>
@@ -850,7 +863,6 @@ export default function CipherChat() {
                     <button className="mobile-back-btn" onClick={() => setActiveChat(null)}>
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
                     </button>
-                    {/* CRASH FIX: Optional chaining and fallback applied here */}
                     <div className={`hdr-av ${activeChat.type === "group" ? "hdr-av--group" : "hdr-av--dm"}`}>
                       {activeChat.name?.[0]?.toUpperCase() || "?"}
                     </div>
