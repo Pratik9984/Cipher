@@ -3,6 +3,27 @@
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import "./globals.css";
 
+// ─── Capacitor imports (gracefully degrade on web) ───────────────────────────
+let CapacitorCore: typeof import("@capacitor/core") | null = null;
+let CapacitorApp: { App: import("@capacitor/app").AppPlugin } | null = null;
+let CapacitorCamera: { Camera: import("@capacitor/camera").CameraPlugin } | null = null;
+
+// Lazy-load Capacitor only when running natively
+const loadCapacitor = async () => {
+  try {
+    CapacitorCore = await import("@capacitor/core");
+    if (CapacitorCore.Capacitor.isNativePlatform()) {
+      [CapacitorApp, CapacitorCamera] = await Promise.all([
+        import("@capacitor/app"),
+        import("@capacitor/camera"),
+      ]);
+    }
+  } catch {
+    // Running on web without Capacitor installed — that's fine
+  }
+};
+
+// ─── Types ───────────────────────────────────────────────────────────────────
 type Chat = { type: "user" | "group"; id: string | number; name: string };
 type Contact = {
   phone_number: string;
@@ -28,7 +49,6 @@ type Message = {
 type GroupedMessage = ({ type: "divider"; label: string } | ({ type: "msg" } & Message));
 type CallState = "idle" | "incoming" | "calling" | "connected";
 type ApiOptions = RequestInit & { headers?: HeadersInit };
-
 type CallLogEntry = {
   id: string;
   peer: string;
@@ -39,22 +59,100 @@ type CallLogEntry = {
   duration: number;
 };
 
-const errorMessage = (error: unknown) => error instanceof Error ? error.message : "Request failed";
+// ─── Constants ───────────────────────────────────────────────────────────────
+const errorMessage = (error: unknown) =>
+  error instanceof Error ? error.message : "Request failed";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "https://chatbackend-46yy.onrender.com";
-const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
+const API =
+  process.env.NEXT_PUBLIC_API_URL || "https://pratik0165-cipherbackend.hf.space";
+const WS =
+  process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
+/** ICE servers — add TURN credentials here for reliable NAT traversal on mobile */
+const RTC_CONFIG: RTCConfiguration = {
+  iceServers: [
+    { urls: "stun:stun.l.google.com:19302" },
+    { urls: "stun:stun1.l.google.com:19302" },
+    { urls: "stun:stun2.l.google.com:19302" },
+    // Example TURN — replace with your own for production:
+    // {
+    //    urls: "turn:your-turn-server.com:3478",
+    //    username: "user",
+    //    credential: "password",
+    // },
+  ],
+  iceCandidatePoolSize: 10,
+  iceTransportPolicy: "all",
+};
+
+const PAGE = 50;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Returns getUserMedia constraints tuned for the platform */
+function getMediaConstraints(video: boolean, facingMode: "user" | "environment"): MediaStreamConstraints {
+  return {
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true,
+    },
+    video: video
+      ? {
+        facingMode: { ideal: facingMode },
+        width: { ideal: 1280, max: 1920 },
+        height: { ideal: 720, max: 1080 },
+        frameRate: { ideal: 30 },
+      }
+      : false,
+  };
+}
+
+/**
+ * Request camera permissions via Capacitor on native platforms.
+ * Falls back to a no-op on web.
+ */
+async function requestNativePermissions(video: boolean): Promise<boolean> {
+  if (!CapacitorCore?.Capacitor.isNativePlatform() || !CapacitorCamera) return true;
+  try {
+    // @capacitor/camera only requests 'camera' and 'photos' permissions.
+    // Microphone prompts are handled natively by the OS when getUserMedia is called.
+    if (video) {
+      const result = await CapacitorCamera.Camera.requestPermissions({
+        permissions: ["camera"],
+      });
+
+      if (result.camera === "denied") {
+        alert("Camera permission was denied. Please enable it in Settings.");
+        return false;
+      }
+    }
+    return true;
+  } catch (e) {
+    console.warn("Capacitor permission request failed:", e);
+    return true; // Let getUserMedia surface its own error
+  }
+}
+
+// ─── Component ───────────────────────────────────────────────────────────────
 export default function PulseChat() {
   const [isMounted, setIsMounted] = useState(false);
-  useEffect(() => setIsMounted(true), []);
+  useEffect(() => {
+    setIsMounted(true);
+    loadCapacitor();
+  }, []);
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
   const [phoneNumber, setPhoneNumber] = useState("");
   const [otp, setOtp] = useState("");
   const [otpSent, setOtpSent] = useState(false);
-  const [token, setToken] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_token") || ""));
-  const [currentUser, setCurrentUser] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_user") || ""));
-
+  const [token, setToken] = useState(() =>
+    typeof window === "undefined" ? "" : localStorage.getItem("chat_token") || ""
+  );
+  const [currentUser, setCurrentUser] = useState(() =>
+    typeof window === "undefined" ? "" : localStorage.getItem("chat_user") || ""
+  );
   const [profile, setProfile] = useState({ displayName: "", avatarUrl: "" });
-
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const isAuth = !!token;
@@ -65,6 +163,7 @@ export default function PulseChat() {
     }
   }, [isAuth]);
 
+  // ── Chat state ────────────────────────────────────────────────────────────
   const [contacts, setContacts] = useState<Contact[]>([]);
   const [groups, setGroups] = useState<Group[]>([]);
   const [activeChat, setActiveChat] = useState<Chat | null>(null);
@@ -73,11 +172,11 @@ export default function PulseChat() {
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [unread, setUnread] = useState<Record<string, number>>({});
-
   const [editingId, setEditingId] = useState<string | number | null>(null);
   const [editingText, setEditingText] = useState("");
   const [typingSet, setTypingSet] = useState<Set<string>>(new Set());
 
+  // ── UI toggles ────────────────────────────────────────────────────────────
   const [showEmojis, setShowEmojis] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showCallLogUI, setShowCallLogUI] = useState(false);
@@ -89,28 +188,56 @@ export default function PulseChat() {
   const [newGroupMembers, setNewGroupMembers] = useState("");
   const [editDisplayName, setEditDisplayName] = useState("");
   const [isUploadingAvatar, setIsUploadingAvatar] = useState(false);
-
   const [isRecording, setIsRecording] = useState(false);
-  const [callState, setCallState] = useState<CallState>("idle");
-  const [isVideoCall, setIsVideoCall] = useState(false);
-  const [callPeer, setCallPeer] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<{ url: string; type: string } | null>(null);
-
   const [callLogs, setCallLogs] = useState<CallLogEntry[]>([]);
-
   const [showHeaderNicknameEdit, setShowHeaderNicknameEdit] = useState(false);
   const [headerNicknameValue, setHeaderNicknameValue] = useState("");
   const [showContactProfile, setShowContactProfile] = useState(false);
-
   const [nicknames, setNicknames] = useState<Record<string, string>>({});
 
-  // NEW CALL STATES
+  // ── Call state ────────────────────────────────────────────────────────────
+  const [callState, setCallState] = useState<CallState>("idle");
+  const [isVideoCall, setIsVideoCall] = useState(false);
+  const [callPeer, setCallPeer] = useState<string | null>(null);
   const [callDuration, setCallDuration] = useState(0);
   const [isMuted, setIsMuted] = useState(false);
-  const [isVideoMuted, setIsVideoMuted] = useState(false);
+  const [isSpeaker, setIsSpeaker] = useState(true);
   const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
-  const [isSpeakerOff, setIsSpeakerOff] = useState(false);
 
+  // ── Refs ──────────────────────────────────────────────────────────────────
+  const msgListRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const localVideoRef = useRef<HTMLVideoElement | null>(null);
+  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const wsRef = useRef<WebSocket | null>(null);
+  const wsRetryDelay = useRef(1000);
+  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const audioChunksRef = useRef<Blob[]>([]);
+  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
+  const pendingRemoteDescriptionRef = useRef<RTCSessionDescriptionInit | null>(null);
+  const localStreamRef = useRef<MediaStream | null>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
+  const messagesCache = useRef<Record<string, Message[]>>({});
+  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
+  const callStateRef = useRef<CallState>("idle");
+  const callStartTimeRef = useRef<number | null>(null);
+  const callDirectionRef = useRef<"incoming" | "outgoing" | null>(null);
+
+  const emojis = ["😀", "😂", "🥰", "😎", "🤔", "😭", "😡", "👍", "❤️", "🔥", "🎉", "🚀", "✅", "💯", "🙏", "🫡", "😤", "🤩", "💀", "🫶"];
+
+  const isTyping = useMemo(
+    () => activeChat?.type === "user" && typingSet.has(String(activeChat.id)),
+    [activeChat, typingSet]
+  );
+
+  const updateCallState = useCallback((newState: CallState) => {
+    setCallState(newState);
+    callStateRef.current = newState;
+  }, []);
+
+  // ── Persisted data ────────────────────────────────────────────────────────
   useEffect(() => {
     if (!currentUser) return;
     try {
@@ -128,12 +255,14 @@ export default function PulseChat() {
     }
   }, [currentUser]);
 
-  // Call Duration Timer
+  // ── Call duration timer ───────────────────────────────────────────────────
   useEffect(() => {
-    let interval: NodeJS.Timeout;
+    let interval: ReturnType<typeof setInterval>;
     if (callState === "connected") {
       interval = setInterval(() => {
-        setCallDuration(prev => prev + 1);
+        setCallDuration(
+          Math.floor((Date.now() - (callStartTimeRef.current || Date.now())) / 1000)
+        );
       }, 1000);
     } else {
       setCallDuration(0);
@@ -141,81 +270,67 @@ export default function PulseChat() {
     return () => clearInterval(interval);
   }, [callState]);
 
-  const msgListRef = useRef<HTMLDivElement | null>(null);
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const avatarInputRef = useRef<HTMLInputElement | null>(null);
-  const localVideoRef = useRef<HTMLVideoElement | null>(null);
-  const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  // ── API helper ────────────────────────────────────────────────────────────
+  const apiFetch = useCallback(
+    async <T,>(path: string, opts: ApiOptions = {}): Promise<T> => {
+      const headers = new Headers(opts.headers);
+      if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+      headers.set("ngrok-skip-browser-warning", "true");
+      const currentToken =
+        token || (typeof window !== "undefined" ? localStorage.getItem("chat_token") : "");
+      if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
+      const res = await fetch(`${API}${path}`, { ...opts, headers });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ detail: "Request failed" }));
+        throw new Error(body.detail || "Request failed");
+      }
+      return res.json();
+    },
+    [token]
+  );
 
-  const wsRef = useRef<WebSocket | null>(null);
-  const wsRetryDelay = useRef(1000);
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const audioChunksRef = useRef<Blob[]>([]);
-  const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
-  const pendingRemoteDescriptionRef = useRef<RTCSessionDescriptionInit | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
-  const remoteStreamRef = useRef<MediaStream | null>(null);
-  const messagesCache = useRef<Record<string, Message[]>>({});
-  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
-
-  const callStateRef = useRef<CallState>("idle");
-  const callStartTimeRef = useRef<number | null>(null);
-  const callDirectionRef = useRef<"incoming" | "outgoing" | null>(null);
-
-  const updateCallState = useCallback((newState: CallState) => {
-    setCallState(newState);
-    callStateRef.current = newState;
-  }, []);
-
-  const emojis = ["😀", "😂", "🥰", "😎", "🤔", "😭", "😡", "👍", "❤️", "🔥", "🎉", "🚀", "✅", "💯", "🙏", "🫡", "😤", "🤩", "💀", "🫶"];
-  const PAGE = 50;
-
-  const isTyping = useMemo(() => activeChat?.type === "user" && typingSet.has(String(activeChat.id)), [activeChat, typingSet]);
-
-  const apiFetch = useCallback(async <T,>(path: string, opts: ApiOptions = {}): Promise<T> => {
-    const headers = new Headers(opts.headers);
-    if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
-    headers.set("ngrok-skip-browser-warning", "true");
-    const currentToken = token || (typeof window !== "undefined" ? localStorage.getItem("chat_token") : "");
-    if (currentToken) headers.set("Authorization", `Bearer ${currentToken}`);
-    const res = await fetch(`${API}${path}`, { ...opts, headers });
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({ detail: "Request failed" }));
-      throw new Error(body.detail || "Request failed");
-    }
-    return res.json();
-  }, [token]);
-
+  // ── Data loaders ──────────────────────────────────────────────────────────
   const loadProfile = useCallback(async () => {
     try {
-      const data = await apiFetch<{ display_name: string, avatar_url: string }>("/profile/me");
+      const data = await apiFetch<{ display_name: string; avatar_url: string }>("/profile/me");
       setProfile({ displayName: data.display_name || "", avatarUrl: data.avatar_url || "" });
       setEditDisplayName(data.display_name || "");
     } catch { }
   }, [apiFetch]);
 
   const loadContacts = useCallback(async () => {
-    try { setContacts(await apiFetch<Contact[]>("/contacts")); } catch { }
+    try {
+      setContacts(await apiFetch<Contact[]>("/contacts"));
+    } catch { }
   }, [apiFetch]);
 
   const loadGroups = useCallback(async () => {
-    try { setGroups(await apiFetch<Group[]>("/groups")); } catch { }
+    try {
+      setGroups(await apiFetch<Group[]>("/groups"));
+    } catch { }
   }, [apiFetch]);
 
   const scrollBottom = () => {
     if (msgListRef.current) msgListRef.current.scrollTop = msgListRef.current.scrollHeight;
   };
 
-  const loadHistory = async (chat: Chat, beforeId: string | number | null = null) => {
+  const loadHistory = async (
+    chat: Chat,
+    beforeId: string | number | null = null
+  ) => {
     if (!chat) return;
     setLoadingMore(true);
     try {
       const { type, id } = chat;
-      const base = type === "user" ? `/messages/direct/${encodeURIComponent(id)}` : `/messages/group/${id}`;
-      const history = await apiFetch<Message[]>(base + (beforeId ? `?before_id=${beforeId}` : ""));
-
+      const base =
+        type === "user"
+          ? `/messages/direct/${encodeURIComponent(id)}`
+          : `/messages/group/${id}`;
+      const history = await apiFetch<Message[]>(
+        base + (beforeId ? `?before_id=${beforeId}` : "")
+      );
       if (beforeId) {
-        setMessages(prev => {
+        setMessages((prev) => {
           const next = [...history, ...prev];
           messagesCache.current[chat.id] = next;
           return next;
@@ -231,72 +346,179 @@ export default function PulseChat() {
   };
 
   const notify = (title: string, body: string) => {
-    if (typeof window === "undefined" || Notification.permission !== "granted" || document.hasFocus()) return;
+    if (
+      typeof window === "undefined" ||
+      Notification.permission !== "granted" ||
+      document.hasFocus()
+    )
+      return;
     const n = new Notification(title, { body });
     setTimeout(() => n.close(), 5000);
   };
 
-  const endCall = useCallback((sendSignal = true, explicitStatus?: "completed" | "missed" | "rejected") => {
-    if (callPeer && callDirectionRef.current) {
-      const duration = callStartTimeRef.current && callStateRef.current === "connected"
-        ? Math.floor((Date.now() - callStartTimeRef.current) / 1000)
-        : 0;
-      const finalStatus = explicitStatus || (callStateRef.current === "connected" ? "completed" : "missed");
+  const formatCallDuration = (sec: number) => {
+    const m = Math.floor(sec / 60);
+    const s = sec % 60;
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
 
-      const newLog: CallLogEntry = {
-        id: Date.now().toString() + Math.random().toString(),
-        peer: callPeer,
-        direction: callDirectionRef.current,
-        media: isVideoCall ? "video" : "audio",
-        status: finalStatus,
-        timestamp: new Date().toISOString(),
-        duration
-      };
+  // ── Call controls ─────────────────────────────────────────────────────────
+  const toggleMute = useCallback(() => {
+    if (!localStreamRef.current) return;
+    const newMuted = !isMuted;
+    localStreamRef.current.getAudioTracks().forEach((t) => {
+      t.enabled = !newMuted;
+    });
+    setIsMuted(newMuted);
+  }, [isMuted]);
 
-      setCallLogs(prev => {
-        const next = [newLog, ...prev];
-        if (currentUser) localStorage.setItem(`call_logs_${currentUser}`, JSON.stringify(next));
-        return next;
-      });
+  /**
+   * Speaker toggle — on native, we'd use NativeAudio/CapacitorAudio routing.
+   * On web/WKWebView the volume approach is the best we can do without a plugin.
+   */
+  const toggleSpeaker = useCallback(() => {
+    const newSpeaker = !isSpeaker;
+    setIsSpeaker(newSpeaker);
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.volume = newSpeaker ? 1.0 : 0.2;
     }
+  }, [isSpeaker]);
 
-    if (sendSignal && callPeer && wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "call_end", target_user: callPeer }));
+  const switchCamera = useCallback(async () => {
+    if (!isVideoCall || !localStreamRef.current) return;
+    const newFacing = facingMode === "user" ? "environment" : "user";
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia(
+        getMediaConstraints(true, newFacing)
+      );
+      const newVideoTrack = newStream.getVideoTracks()[0];
+      const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
+
+      if (oldVideoTrack) {
+        oldVideoTrack.stop();
+        localStreamRef.current.removeTrack(oldVideoTrack);
+      }
+      localStreamRef.current.addTrack(newVideoTrack);
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = localStreamRef.current;
+      }
+      if (peerConnectionRef.current) {
+        const sender = peerConnectionRef.current
+          .getSenders()
+          .find((s) => s.track?.kind === "video");
+        if (sender) await sender.replaceTrack(newVideoTrack);
+      }
+      setFacingMode(newFacing);
+    } catch (e) {
+      console.error("Camera switch failed", e);
     }
-    if (localStreamRef.current) localStreamRef.current.getTracks().forEach(t => t.stop());
-    if (peerConnectionRef.current) peerConnectionRef.current.close();
-    if (localVideoRef.current) localVideoRef.current.srcObject = null;
-    if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+  }, [facingMode, isVideoCall]);
 
-    peerConnectionRef.current = null;
-    pendingRemoteDescriptionRef.current = null;
-    localStreamRef.current = null;
-    remoteStreamRef.current = null;
-    iceCandidateQueueRef.current = [];
+  // ── End call ──────────────────────────────────────────────────────────────
+  const endCall = useCallback(
+    (sendSignal = true, explicitStatus?: "completed" | "missed" | "rejected") => {
+      if (callPeer && callDirectionRef.current) {
+        const duration =
+          callStartTimeRef.current && callStateRef.current === "connected"
+            ? Math.floor((Date.now() - callStartTimeRef.current) / 1000)
+            : 0;
+        const finalStatus =
+          explicitStatus ||
+          (callStateRef.current === "connected" ? "completed" : "missed");
 
-    // Reset Call Preferences
-    setIsMuted(false);
-    setIsVideoMuted(false);
-    setFacingMode("user");
-    setIsSpeakerOff(false);
+        const newLog: CallLogEntry = {
+          id: Date.now().toString() + Math.random().toString(),
+          peer: callPeer,
+          direction: callDirectionRef.current,
+          media: isVideoCall ? "video" : "audio",
+          status: finalStatus,
+          timestamp: new Date().toISOString(),
+          duration,
+        };
 
-    updateCallState("idle");
-    setCallPeer(null);
+        setCallLogs((prev) => {
+          const next = [newLog, ...prev];
+          if (currentUser)
+            localStorage.setItem(`call_logs_${currentUser}`, JSON.stringify(next));
+          return next;
+        });
+      }
 
-    callStartTimeRef.current = null;
-    callDirectionRef.current = null;
-  }, [callPeer, isVideoCall, updateCallState, currentUser]);
+      if (sendSignal && callPeer && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({ type: "call_end", target_user: callPeer }));
+      }
 
+      // Stop all media tracks
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
+      peerConnectionRef.current?.close();
+
+      // Clear video elements
+      if (localVideoRef.current) localVideoRef.current.srcObject = null;
+      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+
+      // Reset refs
+      peerConnectionRef.current = null;
+      pendingRemoteDescriptionRef.current = null;
+      localStreamRef.current = null;
+      remoteStreamRef.current = null;
+      iceCandidateQueueRef.current = [];
+
+      // Reset state
+      updateCallState("idle");
+      setCallPeer(null);
+      setIsMuted(false);
+      setIsSpeaker(true);
+      setFacingMode("user");
+      setCallDuration(0);
+      callStartTimeRef.current = null;
+      callDirectionRef.current = null;
+    },
+    [callPeer, currentUser, isVideoCall, updateCallState]
+  );
+
+  // ── Capacitor App lifecycle — end call when app is backgrounded ───────────
+  useEffect(() => {
+    let listenerHandle: { remove: () => void } | null = null;
+
+    const attachLifecycle = async () => {
+      if (!CapacitorCore?.Capacitor.isNativePlatform() || !CapacitorApp) return;
+      try {
+        listenerHandle = await CapacitorApp.App.addListener(
+          "appStateChange",
+          ({ isActive }) => {
+            if (!isActive && callStateRef.current !== "idle") {
+              endCall(true);
+            }
+          }
+        );
+      } catch (e) {
+        console.warn("Could not attach Capacitor App lifecycle listener:", e);
+      }
+    };
+
+    attachLifecycle();
+    return () => {
+      listenerHandle?.remove();
+    };
+  }, [endCall]);
+
+  // ── WebSocket ─────────────────────────────────────────────────────────────
   const initWSRef = useRef<(() => void) | null>(null);
 
   const initWS = useCallback(() => {
-    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+    }
     if (!token) return;
 
     const ws = new WebSocket(`${WS}/ws?token=${encodeURIComponent(token)}`);
     wsRef.current = ws;
 
-    ws.onopen = () => { wsRetryDelay.current = 1000; };
+    ws.onopen = () => {
+      wsRetryDelay.current = 1000;
+    };
     ws.onclose = () => {
       if (!token) return;
       setTimeout(() => {
@@ -307,41 +529,63 @@ export default function PulseChat() {
 
     ws.onmessage = async ({ data: raw }) => {
       let data: Partial<Message> & Record<string, unknown>;
-      try { data = JSON.parse(raw); } catch { return; }
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        return;
+      }
 
       switch (data.type) {
         case "typing":
           if (typeof data.user === "string" && data.user !== currentUser) {
-            setTypingSet(prev => new Set(prev).add(data.user as string));
+            setTypingSet((prev) => new Set(prev).add(data.user as string));
             setTimeout(() => {
-              setTypingSet(prev => { const next = new Set(prev); next.delete(data.user as string); return next; });
+              setTypingSet((prev) => {
+                const next = new Set(prev);
+                next.delete(data.user as string);
+                return next;
+              });
             }, 2000);
           }
           break;
+
         case "direct_message": {
-          setTypingSet(prev => { const next = new Set(prev); next.delete(String(data.user)); return next; });
-          const peer = data.user === currentUser ? (data.receiver_phone || data.target_user) : data.user;
+          setTypingSet((prev) => {
+            const next = new Set(prev);
+            next.delete(String(data.user));
+            return next;
+          });
+          const peer =
+            data.user === currentUser
+              ? data.receiver_phone || data.target_user
+              : data.user;
           if (!peer) break;
           const msg = data as Message;
 
-          setContacts(prev => prev.find(c => c.phone_number === peer) ? prev : [...prev, { phone_number: String(peer), display_name: null, is_online: false }]);
+          setContacts((prev) =>
+            prev.find((c) => c.phone_number === peer)
+              ? prev
+              : [...prev, { phone_number: String(peer), display_name: null, is_online: false }]
+          );
 
-          setActiveChat(currentActive => {
+          setActiveChat((currentActive) => {
             if (currentActive?.type === "user" && currentActive.id === peer) {
-              setMessages(prev => {
+              setMessages((prev) => {
                 let next = prev;
                 if (data.user === currentUser) {
-                  const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
+                  const idx = prev.findIndex(
+                    (m) => String(m.id).startsWith("temp-") && m.content === msg.content
+                  );
                   if (idx !== -1) {
                     next = [...prev];
                     next[idx] = msg;
-                  } else if (!prev.find(m => m.id === msg.id)) {
+                  } else if (!prev.find((m) => m.id === msg.id)) {
                     next = [...prev, msg];
                   }
-                } else if (!prev.find(m => m.id === msg.id)) {
+                } else if (!prev.find((m) => m.id === msg.id)) {
                   next = [...prev, msg];
                 }
-                messagesCache.current[peer] = next;
+                messagesCache.current[peer as string] = next;
                 return next;
               });
               setTimeout(scrollBottom, 50);
@@ -349,28 +593,34 @@ export default function PulseChat() {
                 ws.send(JSON.stringify({ type: "read_receipt", target_user: peer }));
               }
             } else if (data.user !== currentUser) {
-              setUnread(prev => ({ ...prev, [String(peer)]: (prev[String(peer)] || 0) + 1 }));
+              setUnread((prev) => ({
+                ...prev,
+                [String(peer)]: (prev[String(peer)] || 0) + 1,
+              }));
               notify(String(data.user), msg.content);
             }
             return currentActive;
           });
           break;
         }
+
         case "group_message": {
-          setActiveChat(currentActive => {
+          setActiveChat((currentActive) => {
             if (currentActive?.type === "group" && currentActive.id === data.group_id) {
-              setMessages(prev => {
+              setMessages((prev) => {
                 let next = prev;
                 const msg = data as Message;
                 if (data.user === currentUser) {
-                  const idx = prev.findIndex(m => String(m.id).startsWith("temp-") && m.content === msg.content);
+                  const idx = prev.findIndex(
+                    (m) => String(m.id).startsWith("temp-") && m.content === msg.content
+                  );
                   if (idx !== -1) {
                     next = [...prev];
                     next[idx] = msg;
-                  } else if (!prev.find(m => m.id === msg.id)) {
+                  } else if (!prev.find((m) => m.id === msg.id)) {
                     next = [...prev, msg];
                   }
-                } else if (!prev.find(m => m.id === msg.id)) {
+                } else if (!prev.find((m) => m.id === msg.id)) {
                   next = [...prev, msg];
                 }
                 messagesCache.current[data.group_id as string | number] = next;
@@ -378,30 +628,48 @@ export default function PulseChat() {
               });
               setTimeout(scrollBottom, 50);
             } else if (data.user !== currentUser) {
-              setUnread(prev => ({ ...prev, [String(data.group_id)]: (prev[String(data.group_id)] || 0) + 1 }));
+              setUnread((prev) => ({
+                ...prev,
+                [String(data.group_id)]: (prev[String(data.group_id)] || 0) + 1,
+              }));
               notify(`${data.group_name}`, `${data.user}: ${data.content}`);
             }
             return currentActive;
           });
           break;
         }
+
         case "read_receipt":
-          setMessages(prev => prev.map(m => m.user === currentUser ? { ...m, is_read: true } : m));
-          break;
-        case "message_edited": {
-          setActiveChat(currentActive => {
-            setMessages(prev => prev.map(m => m.id === data.id ? { ...m, content: String(data.content || ""), edited_at: data.edited_at } : m));
-            return currentActive;
-          });
-          break;
-        }
-        case "message_deleted":
-          setMessages(prev => prev.map(m => m.id === data.id ? { ...m, is_deleted: true } : m));
-          break;
-        case "presence":
-          setContacts(prev => prev.map(c => c.phone_number === data.user ? { ...c, is_online: Boolean(data.online) } : c));
+          setMessages((prev) =>
+            prev.map((m) => (m.user === currentUser ? { ...m, is_read: true } : m))
+          );
           break;
 
+        case "message_edited":
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === data.id
+                ? { ...m, content: String(data.content || ""), edited_at: data.edited_at as string }
+                : m
+            )
+          );
+          break;
+
+        case "message_deleted":
+          setMessages((prev) =>
+            prev.map((m) => (m.id === data.id ? { ...m, is_deleted: true } : m))
+          );
+          break;
+
+        case "presence":
+          setContacts((prev) =>
+            prev.map((c) =>
+              c.phone_number === data.user ? { ...c, is_online: Boolean(data.online) } : c
+            )
+          );
+          break;
+
+        // ── WebRTC signalling ────────────────────────────────────────────────
         case "call_offer":
           iceCandidateQueueRef.current = [];
           setCallPeer(String(data.user || ""));
@@ -410,30 +678,43 @@ export default function PulseChat() {
           callDirectionRef.current = "incoming";
           pendingRemoteDescriptionRef.current = data.sdp as RTCSessionDescriptionInit;
           break;
+
         case "call_answer":
           if (peerConnectionRef.current) {
-            await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp as RTCSessionDescriptionInit));
+            await peerConnectionRef.current.setRemoteDescription(
+              new RTCSessionDescription(data.sdp as RTCSessionDescriptionInit)
+            );
             updateCallState("connected");
             callStartTimeRef.current = Date.now();
-
-            while (iceCandidateQueueRef.current.length > 0) {
-              const candidate = iceCandidateQueueRef.current.shift();
-              if (candidate) {
-                await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
-              }
+            // Flush queued candidates
+            for (const candidate of iceCandidateQueueRef.current) {
+              await peerConnectionRef.current
+                .addIceCandidate(new RTCIceCandidate(candidate))
+                .catch(console.error);
             }
+            iceCandidateQueueRef.current = [];
           }
           break;
+
         case "ice_candidate":
-          if (peerConnectionRef.current && peerConnectionRef.current.remoteDescription) {
-            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate as RTCIceCandidateInit)).catch(console.error);
+          if (
+            peerConnectionRef.current &&
+            peerConnectionRef.current.remoteDescription
+          ) {
+            await peerConnectionRef.current
+              .addIceCandidate(
+                new RTCIceCandidate(data.candidate as RTCIceCandidateInit)
+              )
+              .catch(console.error);
           } else {
             iceCandidateQueueRef.current.push(data.candidate as RTCIceCandidateInit);
           }
           break;
+
         case "call_end":
           endCall(false);
           break;
+
         case "call_reject":
           endCall(false, "rejected");
           break;
@@ -453,47 +734,73 @@ export default function PulseChat() {
       })();
     }
     return () => {
-      if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); }
+      if (wsRef.current) {
+        wsRef.current.onclose = null;
+        wsRef.current.close();
+      }
     };
   }, [token, loadProfile, loadContacts, loadGroups, initWS]);
 
+  // ── Auth ──────────────────────────────────────────────────────────────────
   const sendOTP = async () => {
-    setAuthError(""); setAuthLoading(true);
+    setAuthError("");
+    setAuthLoading(true);
     try {
-      await apiFetch<void>("/auth/send-otp", { method: "POST", body: JSON.stringify({ phone_number: phoneNumber.trim() }) });
+      await apiFetch<void>("/auth/send-otp", {
+        method: "POST",
+        body: JSON.stringify({ phone_number: phoneNumber.trim() }),
+      });
       setOtpSent(true);
-    } catch (e) { setAuthError(errorMessage(e)); }
-    finally { setAuthLoading(false); }
+    } catch (e) {
+      setAuthError(errorMessage(e));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const verifyOTP = async () => {
-    setAuthError(""); setAuthLoading(true);
+    setAuthError("");
+    setAuthLoading(true);
     try {
       const data = await apiFetch<{ access_token: string }>("/auth/verify-otp", {
         method: "POST",
-        body: JSON.stringify({ phone_number: phoneNumber.trim(), otp: otp.trim() })
+        body: JSON.stringify({ phone_number: phoneNumber.trim(), otp: otp.trim() }),
       });
       setToken(data.access_token);
       setCurrentUser(phoneNumber.trim());
       localStorage.setItem("chat_token", data.access_token);
       localStorage.setItem("chat_user", phoneNumber.trim());
-
       if ("Notification" in window) Notification.requestPermission();
-    } catch (e) { setAuthError(errorMessage(e)); }
-    finally { setAuthLoading(false); }
+    } catch (e) {
+      setAuthError(errorMessage(e));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const logout = () => {
-    setToken(""); setCurrentUser(""); setOtpSent(false);
-    setMessages([]); setActiveChat(null); setContacts([]); setGroups([]); setUnread({});
+    setToken("");
+    setCurrentUser("");
+    setOtpSent(false);
+    setMessages([]);
+    setActiveChat(null);
+    setContacts([]);
+    setGroups([]);
+    setUnread({});
     setProfile({ displayName: "", avatarUrl: "" });
     setNicknames({});
     setShowHeaderNicknameEdit(false);
     setShowContactProfile(false);
-    localStorage.removeItem("chat_token"); localStorage.removeItem("chat_user");
-    if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null; }
+    localStorage.removeItem("chat_token");
+    localStorage.removeItem("chat_user");
+    if (wsRef.current) {
+      wsRef.current.onclose = null;
+      wsRef.current.close();
+      wsRef.current = null;
+    }
   };
 
+  // ── Profile ───────────────────────────────────────────────────────────────
   const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -501,11 +808,18 @@ export default function PulseChat() {
     const form = new FormData();
     form.append("file", file);
     try {
-      const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+      const res = await fetch(`${API}/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
       if (!res.ok) throw new Error("Upload failed");
       const data = await res.json();
-      await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ avatar_url: data.url }) });
-      setProfile(prev => ({ ...prev, avatarUrl: data.url }));
+      await apiFetch("/profile/me", {
+        method: "PATCH",
+        body: JSON.stringify({ avatar_url: data.url }),
+      });
+      setProfile((prev) => ({ ...prev, avatarUrl: data.url }));
     } catch {
       alert("Avatar upload failed");
     } finally {
@@ -515,17 +829,21 @@ export default function PulseChat() {
 
   const saveProfile = async () => {
     try {
-      await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ display_name: editDisplayName }) });
-      setProfile(prev => ({ ...prev, displayName: editDisplayName }));
+      await apiFetch("/profile/me", {
+        method: "PATCH",
+        body: JSON.stringify({ display_name: editDisplayName }),
+      });
+      setProfile((prev) => ({ ...prev, displayName: editDisplayName }));
       setShowProfile(false);
     } catch {
       alert("Failed to save profile");
     }
   };
 
+  // ── Nicknames ─────────────────────────────────────────────────────────────
   const saveContactNickname = (phone: string, nickname: string) => {
     const trimmed = nickname.trim();
-    setNicknames(prev => {
+    setNicknames((prev) => {
       const next = { ...prev };
       if (trimmed) {
         next[phone] = trimmed;
@@ -537,9 +855,9 @@ export default function PulseChat() {
       }
       return next;
     });
-    setActiveChat(prev => {
+    setActiveChat((prev) => {
       if (prev?.type === "user" && prev.id === phone) {
-        const c = contacts.find(c => c.phone_number === phone);
+        const c = contacts.find((c) => c.phone_number === phone);
         const newLabel = trimmed || c?.display_name || phone;
         return { ...prev, name: newLabel };
       }
@@ -555,6 +873,7 @@ export default function PulseChat() {
     setShowHeaderNicknameEdit(true);
   };
 
+  // ── Chat ──────────────────────────────────────────────────────────────────
   const openChat = async (chat: Chat) => {
     setActiveChat(chat);
     setShowHeaderNicknameEdit(false);
@@ -568,50 +887,68 @@ export default function PulseChat() {
     setHasMore(false);
     setShowEmojis(false);
     setEditingId(null);
-    setUnread(prev => ({ ...prev, [chat.id]: 0 }));
+    setUnread((prev) => ({ ...prev, [chat.id]: 0 }));
     await loadHistory(chat);
   };
 
   const sendMessage = async () => {
     const text = inputMsg.trim();
     if (!text || !activeChat || wsRef.current?.readyState !== WebSocket.OPEN) return;
-    setInputMsg(""); setShowEmojis(false);
+    setInputMsg("");
+    setShowEmojis(false);
 
     const { type, id } = activeChat;
-
     const optimisticMsg: Message = {
       id: `temp-${Date.now()}-${Math.random()}`,
       user: currentUser,
       content: text,
       timestamp: new Date().toISOString(),
-      ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+      ...(type === "user"
+        ? { target_user: String(id) }
+        : { group_id: id, group_name: activeChat.name }),
     };
 
-    setMessages(prev => {
+    setMessages((prev) => {
       const next = [...prev, optimisticMsg];
       messagesCache.current[id] = next;
       return next;
     });
     setTimeout(scrollBottom, 50);
 
-    wsRef.current.send(JSON.stringify(type === "user"
-      ? { type: "direct_message", target_user: id, content: text, message_type: "text" }
-      : { type: "group_message", group_id: id, content: text, message_type: "text" }));
+    wsRef.current.send(
+      JSON.stringify(
+        type === "user"
+          ? { type: "direct_message", target_user: id, content: text, message_type: "text" }
+          : { type: "group_message", group_id: id, content: text, message_type: "text" }
+      )
+    );
   };
 
   const saveEdit = async () => {
     if (!editingId || !activeChat) return;
     try {
-      await apiFetch<void>(`/messages/${editingId}`, { method: "PATCH", body: JSON.stringify({ content: editingText }) });
-      setMessages(prev => prev.map(m => m.id === editingId ? { ...m, content: editingText, edited_at: new Date().toISOString() } : m));
-      setEditingId(null); setEditingText("");
+      await apiFetch<void>(`/messages/${editingId}`, {
+        method: "PATCH",
+        body: JSON.stringify({ content: editingText }),
+      });
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === editingId
+            ? { ...m, content: editingText, edited_at: new Date().toISOString() }
+            : m
+        )
+      );
+      setEditingId(null);
+      setEditingText("");
     } catch { }
   };
 
   const deleteMsg = async (id: string | number) => {
     try {
       await apiFetch<void>(`/messages/${id}`, { method: "DELETE" });
-      setMessages(prev => prev.map(m => m.id === id ? { ...m, is_deleted: true } : m));
+      setMessages((prev) =>
+        prev.map((m) => (m.id === id ? { ...m, is_deleted: true } : m))
+      );
     } catch { }
   };
 
@@ -625,44 +962,69 @@ export default function PulseChat() {
   const handleFile = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !activeChat) return;
-    const form = new FormData(); form.append("file", file);
+    const form = new FormData();
+    form.append("file", file);
     try {
-      const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
-      if (!res.ok) { alert("Upload failed"); return; }
+      const res = await fetch(`${API}/upload`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}` },
+        body: form,
+      });
+      if (!res.ok) {
+        alert("Upload failed");
+        return;
+      }
       const data = await res.json();
-
       const isImg = data.content_type?.startsWith("image");
       const isAud = data.content_type?.startsWith("audio");
       const isVid = data.content_type?.startsWith("video");
       const isPdf = data.content_type === "application/pdf";
 
-      const tag = isImg ? `[IMAGE]${data.url}`
-        : isAud ? `[AUDIO]${data.url}`
-          : isVid ? `[VIDEO]${data.url}`
-            : isPdf ? `[PDF]${data.url}`
+      const tag = isImg
+        ? `[IMAGE]${data.url}`
+        : isAud
+          ? `[AUDIO]${data.url}`
+          : isVid
+            ? `[VIDEO]${data.url}`
+            : isPdf
+              ? `[PDF]${data.url}`
               : `[FILE]${data.url}`;
 
-      const msgType = isImg ? "image" : isAud ? "audio" : isVid ? "video" : isPdf ? "pdf" : "file";
-      const { type, id } = activeChat;
+      const msgType = isImg
+        ? "image"
+        : isAud
+          ? "audio"
+          : isVid
+            ? "video"
+            : isPdf
+              ? "pdf"
+              : "file";
 
+      const { type, id } = activeChat;
       const optimisticMsg: Message = {
         id: `temp-${Date.now()}-${Math.random()}`,
         user: currentUser,
         content: tag,
         timestamp: new Date().toISOString(),
-        ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+        ...(type === "user"
+          ? { target_user: String(id) }
+          : { group_id: id, group_name: activeChat.name }),
       };
 
-      setMessages(prev => {
+      setMessages((prev) => {
         const next = [...prev, optimisticMsg];
         messagesCache.current[id] = next;
         return next;
       });
       setTimeout(scrollBottom, 50);
 
-      wsRef.current?.send(JSON.stringify(type === "user"
-        ? { type: "direct_message", target_user: id, content: tag, message_type: msgType }
-        : { type: "group_message", group_id: id, content: tag, message_type: msgType }));
+      wsRef.current?.send(
+        JSON.stringify(
+          type === "user"
+            ? { type: "direct_message", target_user: id, content: tag, message_type: msgType }
+            : { type: "group_message", group_id: id, content: tag, message_type: msgType }
+        )
+      );
     } catch { }
     e.target.value = "";
   };
@@ -671,8 +1033,8 @@ export default function PulseChat() {
     if (!activeChat) return;
     if (isRecording) {
       mediaRecorderRef.current?.stop();
+      mediaRecorderRef.current?.stream.getTracks().forEach((t) => t.stop());
       setIsRecording(false);
-      mediaRecorderRef.current?.stream.getTracks().forEach(t => t.stop());
       return;
     }
     try {
@@ -680,238 +1042,285 @@ export default function PulseChat() {
       audioChunksRef.current = [];
       const mr = new MediaRecorder(stream);
       mediaRecorderRef.current = mr;
-
-      mr.ondataavailable = e => audioChunksRef.current.push(e.data);
+      mr.ondataavailable = (e) => audioChunksRef.current.push(e.data);
       mr.onstop = async () => {
         const blob = new Blob(audioChunksRef.current, { type: "audio/webm" });
         const form = new FormData();
         form.append("file", blob, "voice.webm");
-
-        const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
+        const res = await fetch(`${API}/upload`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}` },
+          body: form,
+        });
         const data = await res.json();
         const tag = `[AUDIO]${data.url}`;
         const { type, id } = activeChat;
-
         const optimisticMsg: Message = {
           id: `temp-${Date.now()}-${Math.random()}`,
           user: currentUser,
           content: tag,
           timestamp: new Date().toISOString(),
-          ...(type === "user" ? { target_user: String(id) } : { group_id: id, group_name: activeChat.name })
+          ...(type === "user"
+            ? { target_user: String(id) }
+            : { group_id: id, group_name: activeChat.name }),
         };
-        setMessages(prev => {
+        setMessages((prev) => {
           const next = [...prev, optimisticMsg];
           messagesCache.current[id] = next;
           return next;
         });
         setTimeout(scrollBottom, 50);
-
-        wsRef.current?.send(JSON.stringify(type === "user"
-          ? { type: "direct_message", target_user: id, content: tag, message_type: "audio" }
-          : { type: "group_message", group_id: id, content: tag, message_type: "audio" }));
+        wsRef.current?.send(
+          JSON.stringify(
+            type === "user"
+              ? { type: "direct_message", target_user: id, content: tag, message_type: "audio" }
+              : { type: "group_message", group_id: id, content: tag, message_type: "audio" }
+          )
+        );
       };
-      mr.start(); setIsRecording(true);
+      mr.start();
+      setIsRecording(true);
     } catch { }
   };
 
-  const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+  // ── WebRTC core ───────────────────────────────────────────────────────────
 
-  const setupWebRTC = async (targetUser: string) => {
+  /**
+   * Creates and wires up the RTCPeerConnection for a call.
+   * Called by both startCall (outgoing) and acceptCall (incoming).
+   */
+  const setupWebRTC = useCallback(async (targetUser: string) => {
     const localStream = localStreamRef.current;
     if (!localStream) throw new Error("Local media stream is not available");
 
-    const peerConnection = new RTCPeerConnection(rtcConfig);
-    peerConnectionRef.current = peerConnection;
-    localStream.getTracks().forEach(track => peerConnection.addTrack(track, localStream));
+    const pc = new RTCPeerConnection(RTC_CONFIG);
+    peerConnectionRef.current = pc;
 
-    peerConnection.ontrack = (event) => {
+    localStream.getTracks().forEach((track) => pc.addTrack(track, localStream));
+
+    pc.ontrack = (event) => {
       remoteStreamRef.current = event.streams[0];
       if (remoteVideoRef.current) {
         remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        // Explicit play() needed on some mobile WebViews
         remoteVideoRef.current.play().catch(() => { });
       }
     };
 
-    peerConnection.onicecandidate = (event) => {
+    pc.onicecandidate = (event) => {
       if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({ type: "ice_candidate", target_user: targetUser, candidate: event.candidate }));
+        wsRef.current.send(
+          JSON.stringify({
+            type: "ice_candidate",
+            target_user: targetUser,
+            candidate: event.candidate,
+          })
+        );
       }
     };
-  };
 
-  const startCall = async (video = true) => {
-    if (!activeChat || activeChat.type !== "user") return;
-    const target = String(activeChat.id);
-
-    try {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
+    // Log ICE connection state changes for debugging
+    pc.oniceconnectionstatechange = () => {
+      console.log("ICE connection state:", pc.iceConnectionState);
+      if (pc.iceConnectionState === "failed") {
+        // Attempt ICE restart before giving up
+        pc.restartIce();
       }
+    };
 
-      iceCandidateQueueRef.current = [];
-      setIsVideoCall(video);
-      updateCallState("calling");
-      setCallPeer(target);
-      callDirectionRef.current = "outgoing";
-
-      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: video ? { facingMode } : false, audio: true });
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
-
-      await setupWebRTC(target);
-      const peerConnection = peerConnectionRef.current;
-      const ws = wsRef.current;
-      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Call connection is not ready");
-      const offer = await peerConnection.createOffer();
-      await peerConnection.setLocalDescription(offer);
-
-      ws.send(JSON.stringify({ type: "call_offer", target_user: target, sdp: offer, isVideo: video }));
-    } catch (err: any) {
-      console.error("Media access failed:", err);
-      alert(`Could not access camera/microphone. Reason: ${err.name || err.message}`);
-      endCall(false);
-    }
-  };
-
-  const acceptCall = async () => {
-    try {
-      if (localStreamRef.current) {
-        localStreamRef.current.getTracks().forEach(track => track.stop());
+    pc.onconnectionstatechange = () => {
+      console.log("Peer connection state:", pc.connectionState);
+      if (pc.connectionState === "failed" || pc.connectionState === "disconnected") {
+        endCall(true);
       }
+    };
+  }, [endCall]);
 
-      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: isVideoCall ? { facingMode } : false, audio: true });
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
+  /**
+   * Acquire local media, ensuring permissions are granted on native platforms first.
+   */
+  const acquireLocalMedia = useCallback(
+    async (video: boolean, facing: "user" | "environment" = "user"): Promise<MediaStream> => {
+      const granted = await requestNativePermissions(video);
+      if (!granted) throw new Error("Permission denied");
 
-      if (!callPeer || !pendingRemoteDescriptionRef.current) throw new Error("Call offer is not available");
-      await setupWebRTC(callPeer);
+      // Stop any previous stream
+      localStreamRef.current?.getTracks().forEach((t) => t.stop());
 
-      const peerConnection = peerConnectionRef.current;
-      const ws = wsRef.current;
-      if (!peerConnection || ws?.readyState !== WebSocket.OPEN) throw new Error("Call connection is not ready");
-      const offer = new RTCSessionDescription(pendingRemoteDescriptionRef.current);
-      await peerConnection.setRemoteDescription(offer);
-
-      while (iceCandidateQueueRef.current.length > 0) {
-        const candidate = iceCandidateQueueRef.current.shift();
-        if (candidate) {
-          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+      let stream: MediaStream;
+      try {
+        stream = await navigator.mediaDevices.getUserMedia(
+          getMediaConstraints(video, facing)
+        );
+      } catch (err: unknown) {
+        // On some devices the ideal facingMode fails — retry with simpler constraints
+        const e = err as Error;
+        if (video && (e.name === "OverconstrainedError" || e.name === "NotReadableError")) {
+          console.warn("Falling back to basic video constraints:", e);
+          stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+            video: true,
+          });
+        } else {
+          throw err;
         }
       }
 
-      const answer = await peerConnection.createAnswer();
-      await peerConnection.setLocalDescription(answer);
+      localStreamRef.current = stream;
+      return stream;
+    },
+    []
+  );
 
-      ws.send(JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer }));
+  const startCall = useCallback(
+    async (video = true) => {
+      if (!activeChat || activeChat.type !== "user") return;
+      const target = String(activeChat.id);
+
+      try {
+        iceCandidateQueueRef.current = [];
+        setIsVideoCall(video);
+        updateCallState("calling");
+        setCallPeer(target);
+        callDirectionRef.current = "outgoing";
+
+        const stream = await acquireLocalMedia(video, facingMode);
+
+        // Attach local preview — use both ref and srcObject for compatibility
+        if (localVideoRef.current) {
+          localVideoRef.current.srcObject = stream;
+          localVideoRef.current.play().catch(() => { });
+        }
+
+        await setupWebRTC(target);
+
+        const pc = peerConnectionRef.current;
+        const ws = wsRef.current;
+        if (!pc || ws?.readyState !== WebSocket.OPEN)
+          throw new Error("Call connection is not ready");
+
+        const offer = await pc.createOffer({
+          offerToReceiveAudio: true,
+          offerToReceiveVideo: video,
+        });
+        await pc.setLocalDescription(offer);
+
+        ws.send(
+          JSON.stringify({
+            type: "call_offer",
+            target_user: target,
+            sdp: offer,
+            isVideo: video,
+          })
+        );
+      } catch (err: unknown) {
+        const e = err as Error;
+        console.error("startCall failed:", e);
+        alert(`Could not start call. Reason: ${e.name || e.message}`);
+        endCall(false);
+      }
+    },
+    [activeChat, acquireLocalMedia, endCall, facingMode, setupWebRTC, updateCallState]
+  );
+
+  const acceptCall = useCallback(async () => {
+    try {
+      const stream = await acquireLocalMedia(isVideoCall, "user");
+
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play().catch(() => { });
+      }
+
+      if (!callPeer || !pendingRemoteDescriptionRef.current)
+        throw new Error("Call offer is not available");
+
+      await setupWebRTC(callPeer);
+
+      const pc = peerConnectionRef.current;
+      const ws = wsRef.current;
+      if (!pc || ws?.readyState !== WebSocket.OPEN)
+        throw new Error("Call connection is not ready");
+
+      await pc.setRemoteDescription(
+        new RTCSessionDescription(pendingRemoteDescriptionRef.current)
+      );
+
+      // Flush any queued candidates now that remote description is set
+      for (const candidate of iceCandidateQueueRef.current) {
+        await pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+      }
+      iceCandidateQueueRef.current = [];
+
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+
+      ws.send(
+        JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer })
+      );
 
       updateCallState("connected");
       callStartTimeRef.current = Date.now();
-    } catch (err: any) {
-      console.error("Accept call media failed:", err);
+    } catch (err: unknown) {
+      const e = err as Error;
+      console.error("acceptCall failed:", e);
       rejectCall();
     }
-  };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [acquireLocalMedia, callPeer, isVideoCall, setupWebRTC, updateCallState]);
 
-  const rejectCall = () => {
+  const rejectCall = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "call_reject", target_user: callPeer }));
+      wsRef.current.send(
+        JSON.stringify({ type: "call_reject", target_user: callPeer })
+      );
     }
     endCall(false, "rejected");
-  };
+  }, [callPeer, endCall]);
 
-  // CALL CONTROLS ACTIONS
-  const toggleMute = () => {
-    if (!localStreamRef.current) return;
-    const audioTrack = localStreamRef.current.getAudioTracks()[0];
-    if (audioTrack) {
-      audioTrack.enabled = !audioTrack.enabled;
-      setIsMuted(!audioTrack.enabled);
-    }
-  };
+  // ── Formatting helpers ────────────────────────────────────────────────────
+  const formatTime = (ts: string) =>
+    new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
-  const toggleVideo = () => {
-    if (!localStreamRef.current) return;
-    const videoTrack = localStreamRef.current.getVideoTracks()[0];
-    if (videoTrack) {
-      videoTrack.enabled = !videoTrack.enabled;
-      setIsVideoMuted(!videoTrack.enabled);
-    }
-  };
-
-  const toggleSpeaker = () => {
-    if (remoteVideoRef.current) {
-      remoteVideoRef.current.muted = !isSpeakerOff;
-      setIsSpeakerOff(!isSpeakerOff);
-    }
-  };
-
-  const switchCamera = async () => {
-    if (!localStreamRef.current || !isVideoCall) return;
-    const newFacingMode = facingMode === "user" ? "environment" : "user";
-    setFacingMode(newFacingMode);
-
-    try {
-      const newStream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: newFacingMode },
-        audio: false
-      });
-      const newVideoTrack = newStream.getVideoTracks()[0];
-
-      const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
-      if (oldVideoTrack) {
-        oldVideoTrack.stop();
-        localStreamRef.current.removeTrack(oldVideoTrack);
-      }
-
-      localStreamRef.current.addTrack(newVideoTrack);
-      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
-
-      if (peerConnectionRef.current) {
-        const videoSender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === "video");
-        if (videoSender) {
-          videoSender.replaceTrack(newVideoTrack);
-        }
-      }
-    } catch (err) {
-      console.error("Camera switch failed", err);
-      setFacingMode(facingMode);
-    }
-  };
-
-  const formatDuration = (seconds: number) => {
-    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
-    const s = (seconds % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
-  };
-
-  const formatTime = (ts: string) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const formatDate = (ts: string) => {
-    const d = new Date(ts); const today = new Date();
+    const d = new Date(ts);
+    const today = new Date();
     if (d.toDateString() === today.toDateString()) return "Today";
-    const yesterday = new Date(today); yesterday.setDate(today.getDate() - 1);
+    const yesterday = new Date(today);
+    yesterday.setDate(today.getDate() - 1);
     if (d.toDateString() === yesterday.toDateString()) return "Yesterday";
     return d.toLocaleDateString([], { month: "short", day: "numeric" });
   };
 
   const groupedMessages = useMemo(() => {
-    const out: GroupedMessage[] = []; let lastDate: string | null = null;
+    const out: GroupedMessage[] = [];
+    let lastDate: string | null = null;
     for (const msg of messages) {
       const label = formatDate(msg.timestamp);
-      if (label !== lastDate) { out.push({ type: "divider", label }); lastDate = label; }
+      if (label !== lastDate) {
+        out.push({ type: "divider", label });
+        lastDate = label;
+      }
       out.push({ type: "msg", ...msg });
     }
     return out;
   }, [messages]);
 
-  const contactLabel = (c: Contact) => nicknames[c.phone_number] || c.display_name || c.phone_number;
+  const contactLabel = (c: Contact) =>
+    nicknames[c.phone_number] || c.display_name || c.phone_number;
 
-  if (!isMounted) return (
-    <div className="app loading-screen">
-      <div className="spinner loading-spinner-circle"></div>
-    </div>
-  );
+  // ── Render ────────────────────────────────────────────────────────────────
+  if (!isMounted)
+    return (
+      <div className="app loading-screen">
+        <div className="spinner loading-spinner-circle"></div>
+      </div>
+    );
 
   return (
     <div className="app">
       {!isAuth ? (
+        /* ─────────────────────────── AUTH SCREEN ─────────────────────────── */
         <div className="auth-screen">
           <div className="auth-glow auth-glow-1"></div>
           <div className="auth-glow auth-glow-2"></div>
@@ -982,7 +1391,9 @@ export default function PulseChat() {
           </div>
         </div>
       ) : (
+        /* ────────────────────────── MAIN SHELL ───────────────────────────── */
         <div className={`shell ${activeChat ? "chat-active" : ""}`}>
+          {/* ── Sidebar ── */}
           <aside className="sidebar">
             <div className="sb-identity">
               <div className="sb-id-avatar">
@@ -1017,22 +1428,14 @@ export default function PulseChat() {
                         ? <img src={profile.avatarUrl} alt="Avatar" className="img-cover" />
                         : (profile.displayName || currentUser)?.[0]?.toUpperCase() || "?"}
                     </div>
-                    <button
-                      onClick={() => avatarInputRef.current?.click()}
-                      className="avatar-upload-btn"
-                      disabled={isUploadingAvatar}
-                    >
+                    <button onClick={() => avatarInputRef.current?.click()} className="avatar-upload-btn" disabled={isUploadingAvatar}>
                       {isUploadingAvatar ? "Uploading…" : "📷 Change Picture"}
                     </button>
                   </div>
-                  <p className="text-muted-sm">
-                    Your profile picture is visible to all your contacts.
-                  </p>
+                  <p className="text-muted-sm">Your profile picture is visible to all your contacts.</p>
                 </div>
                 <input value={editDisplayName} onChange={e => setEditDisplayName(e.target.value)} placeholder="Display name…" className="sb-field" />
-                <p className="text-muted-sm text-muted-sm-margin">
-                  Your display name is shown to everyone who has your number.
-                </p>
+                <p className="text-muted-sm text-muted-sm-margin">Your display name is shown to everyone who has your number.</p>
                 <button onClick={saveProfile} className="sb-save-btn">Save Profile</button>
               </div>
             )}
@@ -1043,6 +1446,7 @@ export default function PulseChat() {
 
             <div className="sb-divider"></div>
 
+            {/* Direct Messages */}
             <div className="sb-section">
               <div className="sb-section-hdr">
                 <div className="sb-section-label">
@@ -1078,36 +1482,20 @@ export default function PulseChat() {
                   </button>
                 </div>
               )}
-
               <div className="sb-list">
                 {contacts.map(c => {
                   const label = contactLabel(c);
                   return (
-                    <button
-                      key={c.phone_number}
-                      onClick={() => openChat({ type: "user", id: c.phone_number, name: label })}
-                      className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}
-                    >
+                    <button key={c.phone_number} onClick={() => openChat({ type: "user", id: c.phone_number, name: label })} className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}>
                       <div className="sb-av">
-                        {c.avatar_url ? (
-                          <img src={c.avatar_url} alt="avatar" className="img-cover rounded-circle" />
-                        ) : (
-                          label?.[0]?.toUpperCase() || "?"
-                        )}
+                        {c.avatar_url ? <img src={c.avatar_url} alt="avatar" className="img-cover rounded-circle" /> : label?.[0]?.toUpperCase() || "?"}
                         <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
                       </div>
                       <div className="sb-item-body mw-0">
                         <span className="sb-item-name name-row">
                           {nicknames[c.phone_number] ? (
-                            <>
-                              <span>{nicknames[c.phone_number]}</span>
-                              <span className="name-meta">
-                                ({c.display_name || c.phone_number})
-                              </span>
-                            </>
-                          ) : (
-                            <span>{label}</span>
-                          )}
+                            <><span>{nicknames[c.phone_number]}</span><span className="name-meta">({c.display_name || c.phone_number})</span></>
+                          ) : <span>{label}</span>}
                         </span>
                         <span className={`sb-item-status ${c.is_online ? "online" : ""}`}>
                           {c.is_online ? "● Online" : "○ Offline"}
@@ -1122,6 +1510,7 @@ export default function PulseChat() {
 
             <div className="sb-divider"></div>
 
+            {/* Groups */}
             <div className="sb-section">
               <div className="sb-section-hdr">
                 <div className="sb-section-label">
@@ -1164,6 +1553,7 @@ export default function PulseChat() {
             </div>
           </aside>
 
+          {/* ── Chat area ── */}
           <main className="chat">
             {!activeChat ? (
               <div className="empty-state">
@@ -1181,7 +1571,6 @@ export default function PulseChat() {
                     <button className="mobile-back-btn" onClick={() => setActiveChat(null)}>
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
                     </button>
-
                     <div
                       className={`hdr-av ${activeChat.type === "group" ? "hdr-av--group" : "hdr-av--dm"} ${activeChat.type === "user" ? "cursor-pointer pointer-relative" : "default-relative"}`}
                       onClick={() => activeChat.type === "user" && setShowContactProfile(true)}
@@ -1189,50 +1578,28 @@ export default function PulseChat() {
                     >
                       {activeChat.type === "user" && contacts.find(c => c.phone_number === activeChat.id)?.avatar_url ? (
                         <img src={contacts.find(c => c.phone_number === activeChat.id)!.avatar_url!} alt="avatar" className="img-cover rounded-circle" />
-                      ) : (
-                        activeChat.name?.[0]?.toUpperCase() || "?"
-                      )}
-                      {activeChat.type === "user" && (
-                        <div className="hdr-av-overlay">
-                          view
-                        </div>
-                      )}
+                      ) : activeChat.name?.[0]?.toUpperCase() || "?"}
+                      {activeChat.type === "user" && <div className="hdr-av-overlay">view</div>}
                     </div>
-
                     <div className="hdr-info">
                       <div className="name-row-inline">
                         <span className="hdr-name">
-                          {activeChat.type === "user" ? (
-                            (() => {
-                              const c = contacts.find(c => c.phone_number === activeChat.id);
-                              return c ? contactLabel(c) : activeChat.name;
-                            })()
-                          ) : activeChat.name}
+                          {activeChat.type === "user"
+                            ? (() => { const c = contacts.find(c => c.phone_number === activeChat.id); return c ? contactLabel(c) : activeChat.name; })()
+                            : activeChat.name}
                         </span>
-
                         {activeChat.type === "user" && (
-                          <button
-                            onClick={openHeaderNicknameEdit}
-                            title="Set a private nickname for this contact"
-                            className={`btn-pencil-nickname ${showHeaderNicknameEdit ? "active" : ""}`}
-                          >
-                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
-                              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-                            </svg>
+                          <button onClick={openHeaderNicknameEdit} title="Set a private nickname" className={`btn-pencil-nickname ${showHeaderNicknameEdit ? "active" : ""}`}>
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
                           </button>
                         )}
                       </div>
-
                       {activeChat.type === "user" && (() => {
                         const c = contacts.find(c => c.phone_number === activeChat.id);
                         return nicknames[activeChat.id as string] ? (
-                          <span className="hdr-meta hdr-meta-nickname">
-                            {c?.display_name || c?.phone_number || activeChat.id}
-                          </span>
+                          <span className="hdr-meta hdr-meta-nickname">{c?.display_name || c?.phone_number || activeChat.id}</span>
                         ) : null;
                       })()}
-
                       <span className="hdr-meta">
                         {activeChat.type === "user" ? (
                           <>
@@ -1245,7 +1612,6 @@ export default function PulseChat() {
                       </span>
                     </div>
                   </div>
-
                   <div className="hdr-right">
                     {activeChat.type === "user" && (
                       <>
@@ -1262,9 +1628,7 @@ export default function PulseChat() {
 
                 {showHeaderNicknameEdit && activeChat.type === "user" && (
                   <div className="nickname-edit-panel">
-                    <span className="nickname-edit-label">
-                      🏷 Private nickname:
-                    </span>
+                    <span className="nickname-edit-label">🏷 Private nickname:</span>
                     <input
                       value={headerNicknameValue}
                       onChange={e => setHeaderNicknameValue(e.target.value)}
@@ -1272,34 +1636,16 @@ export default function PulseChat() {
                         if (e.key === "Enter") saveContactNickname(String(activeChat.id), headerNicknameValue);
                         if (e.key === "Escape") setShowHeaderNicknameEdit(false);
                       }}
-                      placeholder={(() => {
-                        const c = contacts.find(c => c.phone_number === activeChat.id);
-                        return `Nickname for ${c?.display_name || c?.phone_number || activeChat.id}`;
-                      })()}
+                      placeholder={(() => { const c = contacts.find(c => c.phone_number === activeChat.id); return `Nickname for ${c?.display_name || c?.phone_number || activeChat.id}`; })()}
                       className="sb-field nickname-edit-input"
                       autoFocus
                     />
                     <div className="nickname-edit-actions">
-                      <button
-                        onClick={() => saveContactNickname(String(activeChat.id), headerNicknameValue)}
-                        className="sb-go-btn btn-save-sm"
-                      >
-                        Save
-                      </button>
+                      <button onClick={() => saveContactNickname(String(activeChat.id), headerNicknameValue)} className="sb-go-btn btn-save-sm">Save</button>
                       {nicknames[String(activeChat.id)] && (
-                        <button
-                          onClick={() => saveContactNickname(String(activeChat.id), "")}
-                          className="sb-go-btn btn-clear-sm"
-                        >
-                          Clear
-                        </button>
+                        <button onClick={() => saveContactNickname(String(activeChat.id), "")} className="sb-go-btn btn-clear-sm">Clear</button>
                       )}
-                      <button
-                        onClick={() => setShowHeaderNicknameEdit(false)}
-                        className="sb-go-btn btn-close-sm"
-                      >
-                        ✕
-                      </button>
+                      <button onClick={() => setShowHeaderNicknameEdit(false)} className="sb-go-btn btn-close-sm">✕</button>
                     </div>
                   </div>
                 )}
@@ -1313,7 +1659,7 @@ export default function PulseChat() {
                 )}
 
                 <div ref={msgListRef} className="msg-list">
-                  {groupedMessages.map((item, idx) => (
+                  {groupedMessages.map((item, idx) =>
                     item.type === "divider" ? (
                       <div key={`div-${item.label}-${idx}`} className="date-sep"><span>{item.label}</span></div>
                     ) : (
@@ -1339,13 +1685,10 @@ export default function PulseChat() {
                               ) : item.content.startsWith("[PDF]") ? (
                                 <iframe src={item.content.replace("[PDF]", "")} className="msg-pdf msg-pdf-media" title="PDF attachment"></iframe>
                               ) : item.content.startsWith("[FILE]") ? (
-                                <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">
-                                  Download file
-                                </a>
+                                <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">Download file</a>
                               ) : (
                                 <span className="msg-text">{item.content}</span>
                               )}
-
                               <div className="msg-footer">
                                 <span className="msg-ts">{formatTime(item.timestamp)}</span>
                                 {item.edited_at && <span className="msg-edited">edited</span>}
@@ -1359,11 +1702,10 @@ export default function PulseChat() {
                                   </span>
                                 )}
                               </div>
-
                               {item.user === currentUser && (
                                 <div className="bubble-actions">
-                                  <button onClick={(e) => { e.stopPropagation(); setEditingId(item.id); setEditingText(item.content); }} title="Edit">✎</button>
-                                  <button onClick={(e) => { e.stopPropagation(); deleteMsg(item.id); }} className="del-action" title="Delete">🗑</button>
+                                  <button onClick={e => { e.stopPropagation(); setEditingId(item.id); setEditingText(item.content); }} title="Edit">✎</button>
+                                  <button onClick={e => { e.stopPropagation(); deleteMsg(item.id); }} className="del-action" title="Delete">🗑</button>
                                 </div>
                               )}
                             </div>
@@ -1371,11 +1713,16 @@ export default function PulseChat() {
                         )}
                       </div>
                     )
-                  ))}
+                  )}
                 </div>
 
                 <div className="typing-area">
-                  {isTyping && <div className="typing-pill fade"><span className="td"></span><span className="td"></span><span className="td"></span><span>{activeChat.name} is typing…</span></div>}
+                  {isTyping && (
+                    <div className="typing-pill fade">
+                      <span className="td"></span><span className="td"></span><span className="td"></span>
+                      <span>{activeChat.name} is typing…</span>
+                    </div>
+                  )}
                 </div>
 
                 {showEmojis && (
@@ -1398,84 +1745,54 @@ export default function PulseChat() {
         </div>
       )}
 
+      {/* ── Contact Profile Modal ── */}
       {showContactProfile && activeChat?.type === "user" && (() => {
         const c = contacts.find(c => c.phone_number === activeChat.id);
         const label = c ? contactLabel(c) : activeChat.name;
         const avatarUrl = c?.avatar_url;
         const initials = label?.[0]?.toUpperCase() || "?";
         return (
-          <div
-            className="file-viewer-overlay cp-backdrop"
-            onClick={() => setShowContactProfile(false)}
-          >
+          <div className="file-viewer-overlay cp-backdrop" onClick={() => setShowContactProfile(false)}>
             <div className="cp-modal" onClick={e => e.stopPropagation()}>
               <button className="cp-close-btn" onClick={() => setShowContactProfile(false)}>✕</button>
-
               <div className="cp-hero">
-                <div className="cp-avatar">
-                  {avatarUrl ? (
-                    <img src={avatarUrl} alt="Profile" className="img-cover" />
-                  ) : initials}
-                </div>
-
+                <div className="cp-avatar">{avatarUrl ? <img src={avatarUrl} alt="Profile" className="img-cover" /> : initials}</div>
                 <div className="cp-name-wrap">
                   <div className="cp-name">{label}</div>
-                  {nicknames[c?.phone_number || ""] && (
-                    <div className="cp-sub">{c?.display_name || c?.phone_number}</div>
-                  )}
+                  {nicknames[c?.phone_number || ""] && <div className="cp-sub">{c?.display_name || c?.phone_number}</div>}
                 </div>
-
                 <div className={`cp-badge ${c?.is_online ? "cp-badge-online" : "cp-badge-offline"}`}>
                   <span className={`cp-badge-dot ${c?.is_online ? "online" : "offline"}`}></span>
                   {c?.is_online ? "Online" : "Offline"}
                 </div>
               </div>
-
               <div className="cp-body">
                 <div className="cp-row">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2">
-                    <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" />
-                  </svg>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   <div>
                     <div className="cp-row-label">Phone</div>
                     <div className="cp-row-val">{c?.phone_number || activeChat.id}</div>
                   </div>
                 </div>
-
                 <div className="cp-row cp-row-between">
                   <div className="cp-row-align">
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2">
-                      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" />
-                    </svg>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" /></svg>
                     <div>
                       <div className="cp-row-label">Your nickname</div>
-                      <div className={`cp-row-val ${!nicknames[c?.phone_number || ""] ? "muted" : ""}`}>
-                        {nicknames[c?.phone_number || ""] || "Not set"}
-                      </div>
+                      <div className={`cp-row-val ${!nicknames[c?.phone_number || ""] ? "muted" : ""}`}>{nicknames[c?.phone_number || ""] || "Not set"}</div>
                     </div>
                   </div>
-                  <button
-                    className="cp-edit-btn"
-                    onClick={() => {
-                      setShowContactProfile(false);
-                      openHeaderNicknameEdit();
-                    }}
-                  >
+                  <button className="cp-edit-btn" onClick={() => { setShowContactProfile(false); openHeaderNicknameEdit(); }}>
                     {nicknames[c?.phone_number || ""] ? "Edit" : "Add"}
                   </button>
                 </div>
-
                 <div className="cp-actions">
                   <button className="cp-action-btn" onClick={() => { setShowContactProfile(false); startCall(false); }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" />
-                    </svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                     Voice call
                   </button>
                   <button className="cp-action-btn primary" onClick={() => { setShowContactProfile(false); startCall(true); }}>
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
-                    </svg>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
                     Video call
                   </button>
                 </div>
@@ -1485,6 +1802,7 @@ export default function PulseChat() {
         );
       })()}
 
+      {/* ── Call Log Modal ── */}
       {showCallLogUI && (
         <div className="file-viewer-overlay" onClick={() => setShowCallLogUI(false)}>
           <div className="viewer-content cl-modal" onClick={e => e.stopPropagation()}>
@@ -1492,7 +1810,6 @@ export default function PulseChat() {
               <h2 className="cl-title">Call History</h2>
               <button className="cl-close" onClick={() => setShowCallLogUI(false)}>✕</button>
             </div>
-
             {callLogs.length === 0 ? (
               <p className="cl-empty">No recent calls</p>
             ) : (
@@ -1501,21 +1818,20 @@ export default function PulseChat() {
                   <div key={log.id} className="cl-item">
                     <div>
                       <strong className={`cl-item-name ${log.status === "missed" || log.status === "rejected" ? "missed" : ""}`}>
-                        {(() => {
-                          const c = contacts.find(c => c.phone_number === log.peer);
-                          return c ? contactLabel(c) : log.peer;
-                        })()}
+                        {(() => { const c = contacts.find(c => c.phone_number === log.peer); return c ? contactLabel(c) : log.peer; })()}
                       </strong>
                       <span className="cl-item-meta">
                         <span>{log.direction === "incoming" ? "↙ Incoming" : "↗ Outgoing"}</span>
                         <span>•</span>
                         <span>{log.media === "video" ? "📹 Video" : "📞 Audio"}</span>
                         <span>•</span>
-                        <span>{new Date(log.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                        <span>{new Date(log.timestamp).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</span>
                       </span>
                     </div>
                     <div className="cl-item-dur">
-                      {log.status === "completed" ? `${Math.floor(log.duration / 60)}m ${log.duration % 60}s` : <span className="cl-item-dur status">{log.status}</span>}
+                      {log.status === "completed"
+                        ? `${Math.floor(log.duration / 60)}m ${log.duration % 60}s`
+                        : <span className="cl-item-dur status">{log.status}</span>}
                     </div>
                   </div>
                 ))}
@@ -1525,12 +1841,37 @@ export default function PulseChat() {
         </div>
       )}
 
+      {/* ── Active Call UI ── */}
       {callState !== "idle" && (
         <div className="call-overlay">
           <div className={`call-modal ${isVideoCall && callState === "connected" ? "video-active" : ""}`}>
-            <div className={`video-container ${(isVideoCall && (callState === "connected" || callState === "calling")) ? "d-block" : "d-none"}`}>
-              <video ref={remoteVideoRef} className="remote-video" autoPlay playsInline></video>
-              <video ref={localVideoRef} className="local-video" autoPlay playsInline muted></video>
+
+            {/* Video streams — always rendered to keep refs alive, visibility toggled via CSS */}
+            <div className={`video-container ${isVideoCall && (callState === "connected" || callState === "calling") ? "d-block" : "d-none"}`}>
+              {/*
+                CAPACITOR FIX:
+                - autoPlay + playsInline are required on iOS WKWebView
+                - muted on local prevents echo
+                - webkit-playsinline (set via attribute) for older iOS
+              */}
+              <video
+                ref={remoteVideoRef}
+                className="remote-video"
+                autoPlay
+                playsInline
+                webkit-playsinline="true"
+              />
+              <video
+                ref={localVideoRef}
+                className="local-video"
+                autoPlay
+                playsInline
+                muted
+                webkit-playsinline="true"
+              />
+              {callState === "connected" && (
+                <div className="video-duration-overlay">{formatCallDuration(callDuration)}</div>
+              )}
             </div>
 
             {(!isVideoCall || callState !== "connected") && (
@@ -1539,80 +1880,70 @@ export default function PulseChat() {
                   {callPeer?.[0]?.toUpperCase()}
                 </div>
                 <h2 className="call-name">
-                  {callPeer && (() => {
-                    const c = contacts.find(c => c.phone_number === callPeer);
-                    return c ? contactLabel(c) : callPeer;
-                  })()}
+                  {callPeer && (() => { const c = contacts.find(c => c.phone_number === callPeer); return c ? contactLabel(c) : callPeer; })()}
                 </h2>
                 <p className="call-status">
                   {callState === "incoming"
-                    ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...`
+                    ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call…`
                     : callState === "calling"
-                      ? "Calling..."
-                      : <span className="call-timer">{formatDuration(callDuration)}</span>}
+                      ? "Calling…"
+                      : `Connected • ${formatCallDuration(callDuration)}`}
                 </p>
               </div>
             )}
 
-            <div className="call-controls-wrapper">
+            <div className="call-controls">
               {callState === "incoming" ? (
-                <div className="call-controls">
+                <>
                   <button onClick={rejectCall} className="call-btn btn-reject" title="Reject">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
                   <button onClick={acceptCall} className="call-btn btn-accept" title="Accept">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
-                </div>
-              ) : (
-                <div className="call-active-controls">
-                  <button onClick={toggleMute} className={`call-action-btn ${isMuted ? 'disabled-state' : ''}`} title="Mute/Unmute Mic">
+                </>
+              ) : callState === "connected" ? (
+                <>
+                  <button onClick={toggleMute} className={`call-btn btn-secondary ${isMuted ? "active-mute" : ""}`} title={isMuted ? "Unmute" : "Mute"}>
                     {isMuted ? (
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 1.88M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
                     ) : (
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
                     )}
                   </button>
-
                   {isVideoCall && (
-                    <>
-                      <button onClick={toggleVideo} className={`call-action-btn ${isVideoMuted ? 'disabled-state' : ''}`} title="Turn Video On/Off">
-                        {isVideoMuted ? (
-                          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
-                        ) : (
-                          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
-                        )}
-                      </button>
-                      <button onClick={switchCamera} className="call-action-btn" title="Switch Camera">
-                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25"></path><polyline points="15 12 20 17 25 12"></polyline></svg>
-                      </button>
-                    </>
+                    <button onClick={switchCamera} className="call-btn btn-secondary" title="Switch Camera">
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="1 4 1 10 7 10"></polyline><polyline points="23 20 23 14 17 14"></polyline><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path></svg>
+                    </button>
                   )}
-
-                  <button onClick={toggleSpeaker} className={`call-action-btn ${isSpeakerOff ? 'disabled-state' : ''}`} title="Speaker On/Off (Mute Remote)">
-                    {isSpeakerOff ? (
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
+                  <button onClick={toggleSpeaker} className={`call-btn btn-secondary ${!isSpeaker ? "active-mute" : ""}`} title={isSpeaker ? "Speaker Off" : "Speaker On"}>
+                    {isSpeaker ? (
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
                     ) : (
-                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                      <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
                     )}
                   </button>
-
                   <button onClick={() => endCall(true)} className="call-btn btn-end" title="End Call">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
-                </div>
+                </>
+              ) : (
+                <button onClick={() => endCall(true)} className="call-btn btn-end" title="Cancel">
+                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                </button>
               )}
             </div>
           </div>
         </div>
       )}
 
+      {/* ── File Viewer ── */}
       {viewFile && (
         <div className="file-viewer-overlay" onClick={() => setViewFile(null)}>
           <button className="close-viewer" onClick={() => setViewFile(null)}>✕</button>
           <div className="viewer-content" onClick={e => e.stopPropagation()}>
             {viewFile.type === "image" && <img src={viewFile.url} alt="attachment" />}
-            {viewFile.type === "video" && <video src={viewFile.url} controls autoPlay />}
+            {viewFile.type === "video" && <video src={viewFile.url} controls autoPlay playsInline />}
           </div>
         </div>
       )}
