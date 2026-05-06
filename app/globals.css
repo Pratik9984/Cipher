@@ -1576,3 +1576,61 @@ input {
     max-width: 90%;
   }
 }
+
+/* ==========================================================================
+   13. NEW WEBRTC CALL ACTION BUTTONS & TIMER
+   ========================================================================== */
+.call-controls-wrapper {
+  width: 100%;
+}
+
+.call-active-controls {
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.5rem;
+  background: rgba(0, 0, 0, 0.6);
+  border-top: 1px solid rgba(255,255,255,0.1);
+  width: 100%;
+  flex-wrap: wrap;
+}
+
+.call-action-btn {
+  width: 48px;
+  height: 48px;
+  border-radius: 50%;
+  background: rgba(255,255,255,0.15);
+  color: white;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+}
+
+.call-action-btn:hover {
+  background: rgba(255,255,255,0.25);
+  transform: scale(1.08);
+}
+
+.call-action-btn:active {
+  transform: scale(0.95);
+}
+
+.call-action-btn.disabled-state {
+  background: rgba(255, 255, 255, 0.9);
+  color: #1a1a2e;
+}
+
+.call-timer {
+  font-size: 1.15rem;
+  font-weight: 600;
+  color: var(--primary);
+  display: inline-block;
+  margin-top: 5px;
+  background: rgba(0, 0, 0, 0.4);
+  padding: 4px 12px;
+  border-radius: 20px;
+  letter-spacing: 1px;
+}
