@@ -41,7 +41,7 @@ type CallLogEntry = {
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "Request failed";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "https://pratik0165-cipherbackend.hf.space";
+const API = process.env.NEXT_PUBLIC_API_URL || "https://chatbackend-46yy.onrender.com";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
 export default function PulseChat() {
