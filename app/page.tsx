@@ -28,6 +28,17 @@ type GroupedMessage = ({ type: "divider"; label: string } | ({ type: "msg" } & M
 type CallState = "idle" | "incoming" | "calling" | "connected";
 type ApiOptions = RequestInit & { headers?: HeadersInit };
 
+// NEW: Call Log Type
+type CallLogEntry = {
+  id: string;
+  peer: string;
+  direction: "incoming" | "outgoing";
+  media: "audio" | "video";
+  status: "completed" | "missed" | "rejected";
+  timestamp: string;
+  duration: number; // in seconds
+};
+
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "Request failed";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "https://chatbackend-46yy.onrender.com";
@@ -43,7 +54,6 @@ export default function CipherChat() {
   const [token, setToken] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_token") || ""));
   const [currentUser, setCurrentUser] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_user") || ""));
   
-  // NEW: Profile state to hold display name and avatar URL
   const [profile, setProfile] = useState({ displayName: "", avatarUrl: "" });
   
   const [authLoading, setAuthLoading] = useState(false);
@@ -71,6 +81,7 @@ export default function CipherChat() {
 
   const [showEmojis, setShowEmojis] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showCallLogUI, setShowCallLogUI] = useState(false); // NEW: Call Log UI Toggle
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [showNewContact, setShowNewContact] = useState(false);
   const [newContactPhone, setNewContactPhone] = useState("");
@@ -85,6 +96,16 @@ export default function CipherChat() {
   const [isVideoCall, setIsVideoCall] = useState(false);
   const [callPeer, setCallPeer] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<{ url: string; type: string } | null>(null);
+
+  // NEW: Call Log State & Persistence
+  const [callLogs, setCallLogs] = useState<CallLogEntry[]>([]);
+  
+  useEffect(() => {
+    if (currentUser) {
+      const savedLogs = localStorage.getItem(`call_logs_${currentUser}`);
+      if (savedLogs) setCallLogs(JSON.parse(savedLogs));
+    }
+  }, [currentUser]);
 
   // ─── Refs ───────────────────────────────────────────────────────────────────
   const msgListRef = useRef<HTMLDivElement | null>(null);
@@ -102,6 +123,16 @@ export default function CipherChat() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const messagesCache = useRef<Record<string, Message[]>>({});
+
+  // NEW: WebRTC Tracking Refs
+  const callStateRef = useRef<CallState>("idle");
+  const callStartTimeRef = useRef<number | null>(null);
+  const callDirectionRef = useRef<"incoming" | "outgoing" | null>(null);
+
+  const updateCallState = useCallback((newState: CallState) => {
+    setCallState(newState);
+    callStateRef.current = newState;
+  }, []);
 
   const emojis = ["😀", "😂", "🥰", "😎", "🤔", "😭", "😡", "👍", "❤️", "🔥", "🎉", "🚀", "✅", "💯", "🙏", "🫡", "😤", "🤩", "💀", "🫶"];
   const PAGE = 50;
@@ -175,7 +206,32 @@ export default function CipherChat() {
     setTimeout(() => n.close(), 5000);
   };
 
-  const endCall = useCallback((sendSignal = true) => {
+  const endCall = useCallback((sendSignal = true, explicitStatus?: "completed" | "missed" | "rejected") => {
+    // 1. Process Call Log
+    if (callPeer && callDirectionRef.current) {
+      const duration = callStartTimeRef.current && callStateRef.current === "connected" 
+          ? Math.floor((Date.now() - callStartTimeRef.current) / 1000) 
+          : 0;
+      const finalStatus = explicitStatus || (callStateRef.current === "connected" ? "completed" : "missed");
+
+      const newLog: CallLogEntry = {
+        id: Date.now().toString() + Math.random().toString(),
+        peer: callPeer,
+        direction: callDirectionRef.current,
+        media: isVideoCall ? "video" : "audio",
+        status: finalStatus,
+        timestamp: new Date().toISOString(),
+        duration
+      };
+
+      setCallLogs(prev => {
+        const next = [newLog, ...prev];
+        if (currentUser) localStorage.setItem(`call_logs_${currentUser}`, JSON.stringify(next));
+        return next;
+      });
+    }
+
+    // 2. Terminate Call
     if (sendSignal && callPeer && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "call_end", target_user: callPeer }));
     }
@@ -188,9 +244,13 @@ export default function CipherChat() {
     pendingRemoteDescriptionRef.current = null;
     localStreamRef.current = null;
     remoteStreamRef.current = null;
-    setCallState("idle");
+    updateCallState("idle");
     setCallPeer(null);
-  }, [callPeer]);
+
+    // 3. Clear Tracking Refs
+    callStartTimeRef.current = null;
+    callDirectionRef.current = null;
+  }, [callPeer, isVideoCall, updateCallState, currentUser]);
 
   const initWSRef = useRef<(() => void) | null>(null);
 
@@ -311,13 +371,15 @@ export default function CipherChat() {
         case "call_offer":
           setCallPeer(String(data.user || ""));
           setIsVideoCall(Boolean(data.isVideo));
-          setCallState("incoming");
+          updateCallState("incoming");
+          callDirectionRef.current = "incoming"; // Track Direction
           pendingRemoteDescriptionRef.current = data.sdp as RTCSessionDescriptionInit;
           break;
         case "call_answer":
           if (peerConnectionRef.current) {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp as RTCSessionDescriptionInit));
-            setCallState("connected");
+            updateCallState("connected");
+            callStartTimeRef.current = Date.now(); // Start Timer
           }
           break;
         case "ice_candidate":
@@ -326,12 +388,14 @@ export default function CipherChat() {
           }
           break;
         case "call_end":
-        case "call_reject":
           endCall(false);
+          break;
+        case "call_reject":
+          endCall(false, "rejected");
           break;
       }
     };
-  }, [token, currentUser, endCall]);
+  }, [token, currentUser, endCall, updateCallState]);
 
   useEffect(() => {
     initWSRef.current = initWS;
@@ -606,8 +670,9 @@ export default function CipherChat() {
       }
 
       setIsVideoCall(video);
-      setCallState("calling");
+      updateCallState("calling");
       setCallPeer(target);
+      callDirectionRef.current = "outgoing"; // Track Direction
 
       localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
@@ -649,7 +714,9 @@ export default function CipherChat() {
       await peerConnection.setLocalDescription(answer);
 
       ws.send(JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer }));
-      setCallState("connected");
+      
+      updateCallState("connected");
+      callStartTimeRef.current = Date.now(); // Start Timer
     } catch (err: any) { 
       console.error("Accept call media failed:", err);
       rejectCall(); 
@@ -660,7 +727,7 @@ export default function CipherChat() {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "call_reject", target_user: callPeer }));
     }
-    endCall(false);
+    endCall(false, "rejected");
   };
 
   // ─── Formatters ─────────────────────────────────────────────────────────────
@@ -807,6 +874,11 @@ export default function CipherChat() {
                 <button onClick={saveProfile} className="sb-save-btn">Save Name</button>
               </div>
             )}
+
+            {/* NEW CALL HISTORY TOGGLE */}
+            <div className="sb-profile-toggle" onClick={() => setShowCallLogUI(true)}>
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg> Call History
+            </div>
 
             <div className="sb-divider"></div>
 
@@ -1058,6 +1130,44 @@ export default function CipherChat() {
               </>
             )}
           </main>
+        </div>
+      )}
+
+      {/* NEW: Call History Modal */}
+      {showCallLogUI && (
+        <div className="file-viewer-overlay" onClick={() => setShowCallLogUI(false)}>
+          <div className="viewer-content call-log-modal" onClick={e => e.stopPropagation()} style={{ background: "var(--bg, #1e1e1e)", padding: "20px", borderRadius: "12px", width: "400px", maxWidth: "90vw", maxHeight: "80vh", overflowY: "auto", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", borderBottom: "1px solid rgba(255,255,255,0.1)", paddingBottom: "10px" }}>
+              <h2 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 600 }}>Call History</h2>
+              <button onClick={() => setShowCallLogUI(false)} style={{ background: "transparent", border: "none", color: "var(--text-muted, #aaa)", cursor: "pointer", fontSize: "1.2rem", padding: "5px" }}>✕</button>
+            </div>
+            
+            {callLogs.length === 0 ? (
+              <p style={{ color: "var(--text-muted, #aaa)", textAlign: "center", padding: "40px 0", fontStyle: "italic" }}>No recent calls</p>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                {callLogs.map(log => (
+                  <div key={log.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
+                    <div>
+                      <strong style={{ display: "block", fontSize: "1rem", color: log.status === "missed" || log.status === "rejected" ? "#ff4d4f" : "var(--text, #fff)", marginBottom: "4px" }}>
+                        {log.peer}
+                      </strong>
+                      <span style={{ fontSize: "0.8rem", color: "var(--text-muted, #aaa)", display: "flex", gap: "6px", alignItems: "center" }}>
+                        <span>{log.direction === "incoming" ? "↙ Incoming" : "↗ Outgoing"}</span>
+                        <span>•</span>
+                        <span>{log.media === "video" ? "📹 Video" : "📞 Audio"}</span>
+                        <span>•</span>
+                        <span>{new Date(log.timestamp).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'})}</span>
+                      </span>
+                    </div>
+                    <div style={{ fontSize: "0.85rem", color: "var(--text-muted, #aaa)", fontWeight: 500 }}>
+                      {log.status === "completed" ? `${Math.floor(log.duration / 60)}m ${log.duration % 60}s` : <span style={{ textTransform: "capitalize" }}>{log.status}</span>}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       )}
 
