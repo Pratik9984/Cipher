@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import "./globals.css";
 
 type Chat = { type: "user" | "group"; id: string | number; name: string };
 type Contact = {
@@ -28,7 +29,6 @@ type GroupedMessage = ({ type: "divider"; label: string } | ({ type: "msg" } & M
 type CallState = "idle" | "incoming" | "calling" | "connected";
 type ApiOptions = RequestInit & { headers?: HeadersInit };
 
-// NEW: Call Log Type
 type CallLogEntry = {
   id: string;
   peer: string;
@@ -36,16 +36,15 @@ type CallLogEntry = {
   media: "audio" | "video";
   status: "completed" | "missed" | "rejected";
   timestamp: string;
-  duration: number; // in seconds
+  duration: number;
 };
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : "Request failed";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "https://chatbackend-46yy.onrender.com";
+const API = process.env.NEXT_PUBLIC_API_URL || "https://pratik0165-cipherbackend.hf.space";
 const WS = process.env.NEXT_PUBLIC_WS_URL || API.replace(/^http/, "ws");
 
-export default function CipherChat() {
-  // ─── State ──────────────────────────────────────────────────────────────────
+export default function PulseChat() {
   const [isMounted, setIsMounted] = useState(false);
   useEffect(() => setIsMounted(true), []);
   const [phoneNumber, setPhoneNumber] = useState("");
@@ -53,9 +52,9 @@ export default function CipherChat() {
   const [otpSent, setOtpSent] = useState(false);
   const [token, setToken] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_token") || ""));
   const [currentUser, setCurrentUser] = useState(() => (typeof window === "undefined" ? "" : localStorage.getItem("chat_user") || ""));
-  
+
   const [profile, setProfile] = useState({ displayName: "", avatarUrl: "" });
-  
+
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const isAuth = !!token;
@@ -81,7 +80,7 @@ export default function CipherChat() {
 
   const [showEmojis, setShowEmojis] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
-  const [showCallLogUI, setShowCallLogUI] = useState(false); // NEW: Call Log UI Toggle
+  const [showCallLogUI, setShowCallLogUI] = useState(false);
   const [showNewGroup, setShowNewGroup] = useState(false);
   const [showNewContact, setShowNewContact] = useState(false);
   const [newContactPhone, setNewContactPhone] = useState("");
@@ -97,9 +96,31 @@ export default function CipherChat() {
   const [callPeer, setCallPeer] = useState<string | null>(null);
   const [viewFile, setViewFile] = useState<{ url: string; type: string } | null>(null);
 
-  // NEW: Call Log State & Persistence
   const [callLogs, setCallLogs] = useState<CallLogEntry[]>([]);
-  
+
+  const [showHeaderNicknameEdit, setShowHeaderNicknameEdit] = useState(false);
+  const [headerNicknameValue, setHeaderNicknameValue] = useState("");
+  const [showContactProfile, setShowContactProfile] = useState(false);
+
+  const [nicknames, setNicknames] = useState<Record<string, string>>({});
+
+  // NEW CALL STATES
+  const [callDuration, setCallDuration] = useState(0);
+  const [isMuted, setIsMuted] = useState(false);
+  const [isVideoMuted, setIsVideoMuted] = useState(false);
+  const [facingMode, setFacingMode] = useState<"user" | "environment">("user");
+  const [isSpeakerOff, setIsSpeakerOff] = useState(false);
+
+  useEffect(() => {
+    if (!currentUser) return;
+    try {
+      const saved = localStorage.getItem(`nicknames_${currentUser}`);
+      setNicknames(saved ? JSON.parse(saved) : {});
+    } catch {
+      setNicknames({});
+    }
+  }, [currentUser]);
+
   useEffect(() => {
     if (currentUser) {
       const savedLogs = localStorage.getItem(`call_logs_${currentUser}`);
@@ -107,7 +128,19 @@ export default function CipherChat() {
     }
   }, [currentUser]);
 
-  // ─── Refs ───────────────────────────────────────────────────────────────────
+  // Call Duration Timer
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (callState === "connected") {
+      interval = setInterval(() => {
+        setCallDuration(prev => prev + 1);
+      }, 1000);
+    } else {
+      setCallDuration(0);
+    }
+    return () => clearInterval(interval);
+  }, [callState]);
+
   const msgListRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
@@ -123,8 +156,8 @@ export default function CipherChat() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const remoteStreamRef = useRef<MediaStream | null>(null);
   const messagesCache = useRef<Record<string, Message[]>>({});
+  const iceCandidateQueueRef = useRef<RTCIceCandidateInit[]>([]);
 
-  // NEW: WebRTC Tracking Refs
   const callStateRef = useRef<CallState>("idle");
   const callStartTimeRef = useRef<number | null>(null);
   const callDirectionRef = useRef<"incoming" | "outgoing" | null>(null);
@@ -139,7 +172,6 @@ export default function CipherChat() {
 
   const isTyping = useMemo(() => activeChat?.type === "user" && typingSet.has(String(activeChat.id)), [activeChat, typingSet]);
 
-  // ─── API Helper ─────────────────────────────────────────────────────────────
   const apiFetch = useCallback(async <T,>(path: string, opts: ApiOptions = {}): Promise<T> => {
     const headers = new Headers(opts.headers);
     if (!headers.has("Content-Type")) headers.set("Content-Type", "application/json");
@@ -154,7 +186,6 @@ export default function CipherChat() {
     return res.json();
   }, [token]);
 
-  // ─── Data Loaders ───────────────────────────────────────────────────────────
   const loadProfile = useCallback(async () => {
     try {
       const data = await apiFetch<{ display_name: string, avatar_url: string }>("/profile/me");
@@ -199,7 +230,6 @@ export default function CipherChat() {
     setLoadingMore(false);
   };
 
-  // ─── WebSocket Logic ────────────────────────────────────────────────────────
   const notify = (title: string, body: string) => {
     if (typeof window === "undefined" || Notification.permission !== "granted" || document.hasFocus()) return;
     const n = new Notification(title, { body });
@@ -207,11 +237,10 @@ export default function CipherChat() {
   };
 
   const endCall = useCallback((sendSignal = true, explicitStatus?: "completed" | "missed" | "rejected") => {
-    // 1. Process Call Log
     if (callPeer && callDirectionRef.current) {
-      const duration = callStartTimeRef.current && callStateRef.current === "connected" 
-          ? Math.floor((Date.now() - callStartTimeRef.current) / 1000) 
-          : 0;
+      const duration = callStartTimeRef.current && callStateRef.current === "connected"
+        ? Math.floor((Date.now() - callStartTimeRef.current) / 1000)
+        : 0;
       const finalStatus = explicitStatus || (callStateRef.current === "connected" ? "completed" : "missed");
 
       const newLog: CallLogEntry = {
@@ -231,7 +260,6 @@ export default function CipherChat() {
       });
     }
 
-    // 2. Terminate Call
     if (sendSignal && callPeer && wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "call_end", target_user: callPeer }));
     }
@@ -244,10 +272,17 @@ export default function CipherChat() {
     pendingRemoteDescriptionRef.current = null;
     localStreamRef.current = null;
     remoteStreamRef.current = null;
+    iceCandidateQueueRef.current = [];
+
+    // Reset Call Preferences
+    setIsMuted(false);
+    setIsVideoMuted(false);
+    setFacingMode("user");
+    setIsSpeakerOff(false);
+
     updateCallState("idle");
     setCallPeer(null);
 
-    // 3. Clear Tracking Refs
     callStartTimeRef.current = null;
     callDirectionRef.current = null;
   }, [callPeer, isVideoCall, updateCallState, currentUser]);
@@ -367,24 +402,33 @@ export default function CipherChat() {
           setContacts(prev => prev.map(c => c.phone_number === data.user ? { ...c, is_online: Boolean(data.online) } : c));
           break;
 
-        // WebRTC Events
         case "call_offer":
+          iceCandidateQueueRef.current = [];
           setCallPeer(String(data.user || ""));
           setIsVideoCall(Boolean(data.isVideo));
           updateCallState("incoming");
-          callDirectionRef.current = "incoming"; // Track Direction
+          callDirectionRef.current = "incoming";
           pendingRemoteDescriptionRef.current = data.sdp as RTCSessionDescriptionInit;
           break;
         case "call_answer":
           if (peerConnectionRef.current) {
             await peerConnectionRef.current.setRemoteDescription(new RTCSessionDescription(data.sdp as RTCSessionDescriptionInit));
             updateCallState("connected");
-            callStartTimeRef.current = Date.now(); // Start Timer
+            callStartTimeRef.current = Date.now();
+
+            while (iceCandidateQueueRef.current.length > 0) {
+              const candidate = iceCandidateQueueRef.current.shift();
+              if (candidate) {
+                await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+              }
+            }
           }
           break;
         case "ice_candidate":
-          if (peerConnectionRef.current?.setRemoteDescription) {
-            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate as RTCIceCandidateInit));
+          if (peerConnectionRef.current && peerConnectionRef.current.remoteDescription) {
+            await peerConnectionRef.current.addIceCandidate(new RTCIceCandidate(data.candidate as RTCIceCandidateInit)).catch(console.error);
+          } else {
+            iceCandidateQueueRef.current.push(data.candidate as RTCIceCandidateInit);
           }
           break;
         case "call_end":
@@ -413,7 +457,6 @@ export default function CipherChat() {
     };
   }, [token, loadProfile, loadContacts, loadGroups, initWS]);
 
-  // ─── Authentication ───────────────────────────────────────────────────────────
   const sendOTP = async () => {
     setAuthError(""); setAuthLoading(true);
     try {
@@ -444,26 +487,26 @@ export default function CipherChat() {
     setToken(""); setCurrentUser(""); setOtpSent(false);
     setMessages([]); setActiveChat(null); setContacts([]); setGroups([]); setUnread({});
     setProfile({ displayName: "", avatarUrl: "" });
+    setNicknames({});
+    setShowHeaderNicknameEdit(false);
+    setShowContactProfile(false);
     localStorage.removeItem("chat_token"); localStorage.removeItem("chat_user");
     if (wsRef.current) { wsRef.current.onclose = null; wsRef.current.close(); wsRef.current = null; }
   };
 
-  // ─── Actions ─────────────────────────────────────────────────────────────────
   const handleAvatarUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setIsUploadingAvatar(true);
-    const form = new FormData(); 
+    const form = new FormData();
     form.append("file", file);
     try {
       const res = await fetch(`${API}/upload`, { method: "POST", headers: { Authorization: `Bearer ${token}` }, body: form });
       if (!res.ok) throw new Error("Upload failed");
       const data = await res.json();
-      
-      // Update profile with new avatar URL
       await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ avatar_url: data.url }) });
       setProfile(prev => ({ ...prev, avatarUrl: data.url }));
-    } catch (err) {
+    } catch {
       alert("Avatar upload failed");
     } finally {
       setIsUploadingAvatar(false);
@@ -475,13 +518,47 @@ export default function CipherChat() {
       await apiFetch("/profile/me", { method: "PATCH", body: JSON.stringify({ display_name: editDisplayName }) });
       setProfile(prev => ({ ...prev, displayName: editDisplayName }));
       setShowProfile(false);
-    } catch (err) {
+    } catch {
       alert("Failed to save profile");
     }
   };
 
+  const saveContactNickname = (phone: string, nickname: string) => {
+    const trimmed = nickname.trim();
+    setNicknames(prev => {
+      const next = { ...prev };
+      if (trimmed) {
+        next[phone] = trimmed;
+      } else {
+        delete next[phone];
+      }
+      if (currentUser) {
+        localStorage.setItem(`nicknames_${currentUser}`, JSON.stringify(next));
+      }
+      return next;
+    });
+    setActiveChat(prev => {
+      if (prev?.type === "user" && prev.id === phone) {
+        const c = contacts.find(c => c.phone_number === phone);
+        const newLabel = trimmed || c?.display_name || phone;
+        return { ...prev, name: newLabel };
+      }
+      return prev;
+    });
+    setShowHeaderNicknameEdit(false);
+  };
+
+  const openHeaderNicknameEdit = () => {
+    if (!activeChat || activeChat.type !== "user") return;
+    const phone = String(activeChat.id);
+    setHeaderNicknameValue(nicknames[phone] || "");
+    setShowHeaderNicknameEdit(true);
+  };
+
   const openChat = async (chat: Chat) => {
     setActiveChat(chat);
+    setShowHeaderNicknameEdit(false);
+    setShowContactProfile(false);
     if (messagesCache.current[chat.id]) {
       setMessages(messagesCache.current[chat.id]);
       setTimeout(scrollBottom, 10);
@@ -637,7 +714,6 @@ export default function CipherChat() {
     } catch { }
   };
 
-  // ─── WebRTC ──────────────────────────────────────────────────────────────────
   const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
 
   const setupWebRTC = async (targetUser: string) => {
@@ -650,7 +726,10 @@ export default function CipherChat() {
 
     peerConnection.ontrack = (event) => {
       remoteStreamRef.current = event.streams[0];
-      if (remoteVideoRef.current) remoteVideoRef.current.srcObject = remoteStreamRef.current;
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = remoteStreamRef.current;
+        remoteVideoRef.current.play().catch(() => { });
+      }
     };
 
     peerConnection.onicecandidate = (event) => {
@@ -663,18 +742,19 @@ export default function CipherChat() {
   const startCall = async (video = true) => {
     if (!activeChat || activeChat.type !== "user") return;
     const target = String(activeChat.id);
-    
+
     try {
       if (localStreamRef.current) {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
 
+      iceCandidateQueueRef.current = [];
       setIsVideoCall(video);
       updateCallState("calling");
       setCallPeer(target);
-      callDirectionRef.current = "outgoing"; // Track Direction
+      callDirectionRef.current = "outgoing";
 
-      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video, audio: true });
+      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: video ? { facingMode } : false, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
 
       await setupWebRTC(target);
@@ -698,7 +778,7 @@ export default function CipherChat() {
         localStreamRef.current.getTracks().forEach(track => track.stop());
       }
 
-      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: isVideoCall, audio: true });
+      localStreamRef.current = await navigator.mediaDevices.getUserMedia({ video: isVideoCall ? { facingMode } : false, audio: true });
       if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
 
       if (!callPeer || !pendingRemoteDescriptionRef.current) throw new Error("Call offer is not available");
@@ -710,16 +790,23 @@ export default function CipherChat() {
       const offer = new RTCSessionDescription(pendingRemoteDescriptionRef.current);
       await peerConnection.setRemoteDescription(offer);
 
+      while (iceCandidateQueueRef.current.length > 0) {
+        const candidate = iceCandidateQueueRef.current.shift();
+        if (candidate) {
+          await peerConnection.addIceCandidate(new RTCIceCandidate(candidate)).catch(console.error);
+        }
+      }
+
       const answer = await peerConnection.createAnswer();
       await peerConnection.setLocalDescription(answer);
 
       ws.send(JSON.stringify({ type: "call_answer", target_user: callPeer, sdp: answer }));
-      
+
       updateCallState("connected");
-      callStartTimeRef.current = Date.now(); // Start Timer
-    } catch (err: any) { 
+      callStartTimeRef.current = Date.now();
+    } catch (err: any) {
       console.error("Accept call media failed:", err);
-      rejectCall(); 
+      rejectCall();
     }
   };
 
@@ -730,7 +817,71 @@ export default function CipherChat() {
     endCall(false, "rejected");
   };
 
-  // ─── Formatters ─────────────────────────────────────────────────────────────
+  // CALL CONTROLS ACTIONS
+  const toggleMute = () => {
+    if (!localStreamRef.current) return;
+    const audioTrack = localStreamRef.current.getAudioTracks()[0];
+    if (audioTrack) {
+      audioTrack.enabled = !audioTrack.enabled;
+      setIsMuted(!audioTrack.enabled);
+    }
+  };
+
+  const toggleVideo = () => {
+    if (!localStreamRef.current) return;
+    const videoTrack = localStreamRef.current.getVideoTracks()[0];
+    if (videoTrack) {
+      videoTrack.enabled = !videoTrack.enabled;
+      setIsVideoMuted(!videoTrack.enabled);
+    }
+  };
+
+  const toggleSpeaker = () => {
+    if (remoteVideoRef.current) {
+      remoteVideoRef.current.muted = !isSpeakerOff;
+      setIsSpeakerOff(!isSpeakerOff);
+    }
+  };
+
+  const switchCamera = async () => {
+    if (!localStreamRef.current || !isVideoCall) return;
+    const newFacingMode = facingMode === "user" ? "environment" : "user";
+    setFacingMode(newFacingMode);
+
+    try {
+      const newStream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: newFacingMode },
+        audio: false
+      });
+      const newVideoTrack = newStream.getVideoTracks()[0];
+
+      const oldVideoTrack = localStreamRef.current.getVideoTracks()[0];
+      if (oldVideoTrack) {
+        oldVideoTrack.stop();
+        localStreamRef.current.removeTrack(oldVideoTrack);
+      }
+
+      localStreamRef.current.addTrack(newVideoTrack);
+      if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
+
+      if (peerConnectionRef.current) {
+        const videoSender = peerConnectionRef.current.getSenders().find(s => s.track?.kind === "video");
+        if (videoSender) {
+          videoSender.replaceTrack(newVideoTrack);
+        }
+      }
+    } catch (err) {
+      console.error("Camera switch failed", err);
+      setFacingMode(facingMode);
+    }
+  };
+
+  const formatDuration = (seconds: number) => {
+    const m = Math.floor(seconds / 60).toString().padStart(2, '0');
+    const s = (seconds % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  };
+
   const formatTime = (ts: string) => new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const formatDate = (ts: string) => {
     const d = new Date(ts); const today = new Date();
@@ -750,13 +901,14 @@ export default function CipherChat() {
     return out;
   }, [messages]);
 
+  const contactLabel = (c: Contact) => nicknames[c.phone_number] || c.display_name || c.phone_number;
+
   if (!isMounted) return (
-    <div className="app" style={{ display: "flex", alignItems: "center", justifyContent: "center", background: "var(--bg)", width: "100vw", height: "100vh" }}>
-      <div className="spinner" style={{ width: 40, height: 40, border: "3px solid rgba(255,255,255,0.1)", borderTopColor: "var(--gold)" }}></div>
+    <div className="app loading-screen">
+      <div className="spinner loading-spinner-circle"></div>
     </div>
   );
 
-  // ─── RENDER ─────────────────────────────────────────────────────────────────
   return (
     <div className="app">
       {!isAuth ? (
@@ -766,19 +918,18 @@ export default function CipherChat() {
           <div className="auth-left">
             <div className="brand">
               <div className="brand-icon">
-                <svg width="22" height="22" viewBox="0 0 28 28" fill="none">
-                  <path d="M4 8C4 5.79 5.79 4 8 4H20C22.21 4 24 5.79 24 8V16C24 18.21 22.21 20 20 20H15L9 24V20H8C5.79 20 4 18.21 4 16V8Z" fill="currentColor" />
-                  <circle cx="10" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" /><circle cx="14" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" /><circle cx="18" cy="12" r="1.5" fill="rgba(0,0,0,0.45)" />
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M22 12h-4l-3 9L9 3l-3 9H2" />
                 </svg>
               </div>
-              <span className="brand-name">Cipher</span>
+              <span className="brand-name">Pulse</span>
             </div>
             <div className="auth-hero">
-              <h1>Connect.<br />Fast.<br /><em>Simple.</em></h1>
-              <p>Real-time messaging platform built for speed and reliability.</p>
+              <h1>Connect.<br />Fast.<br /><em>Alive.</em></h1>
+              <p>Keep your conversations flowing with real-time speed.</p>
             </div>
             <div className="auth-pills">
-              <span className="a-pill a-pill--gold">⚡ Fast</span>
+              <span className="a-pill a-pill--primary">⚡ Fast</span>
               <span className="a-pill">💬 Real-time</span>
               <span className="a-pill">📱 Mobile-ready</span>
             </div>
@@ -832,12 +983,11 @@ export default function CipherChat() {
         </div>
       ) : (
         <div className={`shell ${activeChat ? "chat-active" : ""}`}>
-          {/* Sidebar */}
           <aside className="sidebar">
             <div className="sb-identity">
               <div className="sb-id-avatar">
                 {profile.avatarUrl ? (
-                  <img src={profile.avatarUrl} alt="Avatar" style={{ width: '100%', height: '100%', borderRadius: '14px', objectFit: 'cover' }} />
+                  <img src={profile.avatarUrl} alt="Avatar" className="img-cover rounded-sq" />
                 ) : (
                   (profile.displayName || currentUser)?.[0]?.toUpperCase() || "?"
                 )}
@@ -853,29 +1003,40 @@ export default function CipherChat() {
             </button>
 
             <div className="sb-profile-toggle" onClick={() => setShowProfile(!showProfile)}>
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" /></svg> Edit Profile
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" /></svg> Edit My Profile
               <svg className={`chevron ${showProfile ? "chevron--up" : ""}`} width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="6,9 12,15 18,9" /></svg>
             </div>
-            
-            {/* NEW PROFILE DROP DOWN WITH UPLOAD */}
+
             {showProfile && (
               <div className="sb-profile-form drop">
+                <input type="file" ref={avatarInputRef} accept="image/*" className="hidden-input" onChange={handleAvatarUpload} />
                 <div className="avatar-edit-section">
-                  <input type="file" ref={avatarInputRef} accept="image/*" style={{display: 'none'}} onChange={handleAvatarUpload} />
-                  <button 
-                    onClick={() => avatarInputRef.current?.click()} 
-                    className="avatar-upload-btn"
-                    disabled={isUploadingAvatar}
-                  >
-                    {isUploadingAvatar ? "Uploading..." : "📷 Change Picture"}
-                  </button>
+                  <div className="avatar-edit-row">
+                    <div className="avatar-edit-box">
+                      {profile.avatarUrl
+                        ? <img src={profile.avatarUrl} alt="Avatar" className="img-cover" />
+                        : (profile.displayName || currentUser)?.[0]?.toUpperCase() || "?"}
+                    </div>
+                    <button
+                      onClick={() => avatarInputRef.current?.click()}
+                      className="avatar-upload-btn"
+                      disabled={isUploadingAvatar}
+                    >
+                      {isUploadingAvatar ? "Uploading…" : "📷 Change Picture"}
+                    </button>
+                  </div>
+                  <p className="text-muted-sm">
+                    Your profile picture is visible to all your contacts.
+                  </p>
                 </div>
                 <input value={editDisplayName} onChange={e => setEditDisplayName(e.target.value)} placeholder="Display name…" className="sb-field" />
-                <button onClick={saveProfile} className="sb-save-btn">Save Name</button>
+                <p className="text-muted-sm text-muted-sm-margin">
+                  Your display name is shown to everyone who has your number.
+                </p>
+                <button onClick={saveProfile} className="sb-save-btn">Save Profile</button>
               </div>
             )}
 
-            {/* NEW CALL HISTORY TOGGLE */}
             <div className="sb-profile-toggle" onClick={() => setShowCallLogUI(true)}>
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg> Call History
             </div>
@@ -917,24 +1078,45 @@ export default function CipherChat() {
                   </button>
                 </div>
               )}
+
               <div className="sb-list">
-                {contacts.map(c => (
-                  <button key={c.phone_number} onClick={() => openChat({ type: "user", id: c.phone_number, name: c.nickname || c.display_name || c.phone_number })} className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}>
-                    <div className="sb-av">
-                      {c.avatar_url ? (
-                        <img src={c.avatar_url} alt="avatar" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
-                      ) : (
-                        (c.nickname || c.display_name || c.phone_number)?.[0]?.toUpperCase() || "?"
-                      )}
-                      <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
-                    </div>
-                    <div className="sb-item-body">
-                      <span className="sb-item-name">{c.nickname || c.display_name || c.phone_number}</span>
-                      <span className={`sb-item-status ${c.is_online ? "online" : ""}`}>{c.is_online ? "● Online" : "○ Offline"}</span>
-                    </div>
-                    {unread[c.phone_number] > 0 && <span className="unread">{unread[c.phone_number]}</span>}
-                  </button>
-                ))}
+                {contacts.map(c => {
+                  const label = contactLabel(c);
+                  return (
+                    <button
+                      key={c.phone_number}
+                      onClick={() => openChat({ type: "user", id: c.phone_number, name: label })}
+                      className={`sb-item ${activeChat?.id === c.phone_number ? "sb-item--active" : ""}`}
+                    >
+                      <div className="sb-av">
+                        {c.avatar_url ? (
+                          <img src={c.avatar_url} alt="avatar" className="img-cover rounded-circle" />
+                        ) : (
+                          label?.[0]?.toUpperCase() || "?"
+                        )}
+                        <span className={`pres ${c.is_online ? "pres--on" : ""}`}></span>
+                      </div>
+                      <div className="sb-item-body mw-0">
+                        <span className="sb-item-name name-row">
+                          {nicknames[c.phone_number] ? (
+                            <>
+                              <span>{nicknames[c.phone_number]}</span>
+                              <span className="name-meta">
+                                ({c.display_name || c.phone_number})
+                              </span>
+                            </>
+                          ) : (
+                            <span>{label}</span>
+                          )}
+                        </span>
+                        <span className={`sb-item-status ${c.is_online ? "online" : ""}`}>
+                          {c.is_online ? "● Online" : "○ Offline"}
+                        </span>
+                      </div>
+                      {unread[c.phone_number] > 0 && <span className="unread">{unread[c.phone_number]}</span>}
+                    </button>
+                  );
+                })}
               </div>
             </div>
 
@@ -961,7 +1143,7 @@ export default function CipherChat() {
                       apiFetch("/groups", { method: "POST", body: JSON.stringify({ name: newGroupName.trim(), description: newGroupDesc, members }) })
                         .then(() => { setNewGroupName(""); setNewGroupDesc(""); setNewGroupMembers(""); setShowNewGroup(false); loadGroups(); });
                     }}
-                    className="sb-go-btn purple"
+                    className="sb-go-btn secondary"
                   >
                     Create group
                   </button>
@@ -975,20 +1157,19 @@ export default function CipherChat() {
                       <span className="sb-item-name">{g.name}</span>
                       <span className="sb-item-status">{g.members.length} members</span>
                     </div>
-                    {unread[g.id] > 0 && <span className="unread unread--purple">{unread[g.id]}</span>}
+                    {unread[g.id] > 0 && <span className="unread unread--secondary">{unread[g.id]}</span>}
                   </button>
                 ))}
               </div>
             </div>
           </aside>
 
-          {/* Chat Main */}
           <main className="chat">
             {!activeChat ? (
               <div className="empty-state">
                 <div className="empty-rings">
                   <div className="ring r1"></div><div className="ring r2"></div><div className="ring r3"></div>
-                  <svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ position: "relative", zIndex: 1 }}><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" /></svg>
+                  <svg className="z-1-relative" width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2" /></svg>
                 </div>
                 <h3>No conversation open</h3>
                 <p>Select a contact or group from the sidebar to start messaging</p>
@@ -1000,18 +1181,58 @@ export default function CipherChat() {
                     <button className="mobile-back-btn" onClick={() => setActiveChat(null)}>
                       <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M15 18l-6-6 6-6" /></svg>
                     </button>
-                    
-                    {/* Header Avatar Fix */}
-                    <div className={`hdr-av ${activeChat.type === "group" ? "hdr-av--group" : "hdr-av--dm"}`}>
+
+                    <div
+                      className={`hdr-av ${activeChat.type === "group" ? "hdr-av--group" : "hdr-av--dm"} ${activeChat.type === "user" ? "cursor-pointer pointer-relative" : "default-relative"}`}
+                      onClick={() => activeChat.type === "user" && setShowContactProfile(true)}
+                      title={activeChat.type === "user" ? "View profile" : undefined}
+                    >
                       {activeChat.type === "user" && contacts.find(c => c.phone_number === activeChat.id)?.avatar_url ? (
-                         <img src={contacts.find(c => c.phone_number === activeChat.id)!.avatar_url!} alt="avatar" style={{width: '100%', height: '100%', borderRadius: '50%', objectFit: 'cover'}} />
+                        <img src={contacts.find(c => c.phone_number === activeChat.id)!.avatar_url!} alt="avatar" className="img-cover rounded-circle" />
                       ) : (
-                         activeChat.name?.[0]?.toUpperCase() || "?"
+                        activeChat.name?.[0]?.toUpperCase() || "?"
+                      )}
+                      {activeChat.type === "user" && (
+                        <div className="hdr-av-overlay">
+                          view
+                        </div>
                       )}
                     </div>
 
                     <div className="hdr-info">
-                      <span className="hdr-name">{activeChat.name}</span>
+                      <div className="name-row-inline">
+                        <span className="hdr-name">
+                          {activeChat.type === "user" ? (
+                            (() => {
+                              const c = contacts.find(c => c.phone_number === activeChat.id);
+                              return c ? contactLabel(c) : activeChat.name;
+                            })()
+                          ) : activeChat.name}
+                        </span>
+
+                        {activeChat.type === "user" && (
+                          <button
+                            onClick={openHeaderNicknameEdit}
+                            title="Set a private nickname for this contact"
+                            className={`btn-pencil-nickname ${showHeaderNicknameEdit ? "active" : ""}`}
+                          >
+                            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
+                              <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
+                          </button>
+                        )}
+                      </div>
+
+                      {activeChat.type === "user" && (() => {
+                        const c = contacts.find(c => c.phone_number === activeChat.id);
+                        return nicknames[activeChat.id as string] ? (
+                          <span className="hdr-meta hdr-meta-nickname">
+                            {c?.display_name || c?.phone_number || activeChat.id}
+                          </span>
+                        ) : null;
+                      })()}
+
                       <span className="hdr-meta">
                         {activeChat.type === "user" ? (
                           <>
@@ -1038,6 +1259,50 @@ export default function CipherChat() {
                     )}
                   </div>
                 </header>
+
+                {showHeaderNicknameEdit && activeChat.type === "user" && (
+                  <div className="nickname-edit-panel">
+                    <span className="nickname-edit-label">
+                      🏷 Private nickname:
+                    </span>
+                    <input
+                      value={headerNicknameValue}
+                      onChange={e => setHeaderNicknameValue(e.target.value)}
+                      onKeyDown={e => {
+                        if (e.key === "Enter") saveContactNickname(String(activeChat.id), headerNicknameValue);
+                        if (e.key === "Escape") setShowHeaderNicknameEdit(false);
+                      }}
+                      placeholder={(() => {
+                        const c = contacts.find(c => c.phone_number === activeChat.id);
+                        return `Nickname for ${c?.display_name || c?.phone_number || activeChat.id}`;
+                      })()}
+                      className="sb-field nickname-edit-input"
+                      autoFocus
+                    />
+                    <div className="nickname-edit-actions">
+                      <button
+                        onClick={() => saveContactNickname(String(activeChat.id), headerNicknameValue)}
+                        className="sb-go-btn btn-save-sm"
+                      >
+                        Save
+                      </button>
+                      {nicknames[String(activeChat.id)] && (
+                        <button
+                          onClick={() => saveContactNickname(String(activeChat.id), "")}
+                          className="sb-go-btn btn-clear-sm"
+                        >
+                          Clear
+                        </button>
+                      )}
+                      <button
+                        onClick={() => setShowHeaderNicknameEdit(false)}
+                        className="sb-go-btn btn-close-sm"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  </div>
+                )}
 
                 {hasMore && (
                   <div className="load-more-row">
@@ -1066,13 +1331,13 @@ export default function CipherChat() {
                             {activeChat.type === "group" && item.user !== currentUser && <span className="sender-name">{item.user}</span>}
                             <div className={`bubble ${item.user === currentUser ? "mine" : "theirs"}`}>
                               {item.content.startsWith("[IMAGE]") ? (
-                                <img src={item.content.replace("[IMAGE]", "")} alt="attachment" className="msg-img" style={{ maxWidth: '100%', borderRadius: '8px' }} onClick={() => setViewFile({ url: item.content.replace("[IMAGE]", ""), type: "image" })} />
+                                <img src={item.content.replace("[IMAGE]", "")} alt="attachment" className="msg-img msg-img-media" onClick={() => setViewFile({ url: item.content.replace("[IMAGE]", ""), type: "image" })} />
                               ) : item.content.startsWith("[AUDIO]") ? (
-                                <audio src={item.content.replace("[AUDIO]", "")} controls className="msg-audio" style={{ maxWidth: '100%' }}></audio>
+                                <audio src={item.content.replace("[AUDIO]", "")} controls className="msg-audio msg-audio-media"></audio>
                               ) : item.content.startsWith("[VIDEO]") ? (
-                                <video src={item.content.replace("[VIDEO]", "")} controls className="msg-video" style={{ maxWidth: '100%', borderRadius: '8px' }} onClick={() => setViewFile({ url: item.content.replace("[VIDEO]", ""), type: "video" })}></video>
+                                <video src={item.content.replace("[VIDEO]", "")} controls className="msg-video msg-video-media" onClick={() => setViewFile({ url: item.content.replace("[VIDEO]", ""), type: "video" })}></video>
                               ) : item.content.startsWith("[PDF]") ? (
-                                <iframe src={item.content.replace("[PDF]", "")} className="msg-pdf" style={{ width: '100%', minHeight: '300px', border: 'none', borderRadius: '8px', backgroundColor: 'white' }} title="PDF attachment"></iframe>
+                                <iframe src={item.content.replace("[PDF]", "")} className="msg-pdf msg-pdf-media" title="PDF attachment"></iframe>
                               ) : item.content.startsWith("[FILE]") ? (
                                 <a href={item.content.replace("[FILE]", "")} target="_blank" rel="noreferrer" className="msg-file-link">
                                   Download file
@@ -1120,7 +1385,7 @@ export default function CipherChat() {
                 )}
 
                 <div className="input-bar">
-                  <input type="file" ref={fileInputRef} onChange={handleFile} accept="image/*,audio/*,video/mp4,.pdf" style={{ display: "none" }} />
+                  <input type="file" ref={fileInputRef} onChange={handleFile} accept="image/*,audio/*,video/mp4,.pdf" className="hidden-input" />
                   <button onClick={() => setShowEmojis(!showEmojis)} className={`tool-btn ${showEmojis ? "tool-btn--on" : ""}`}>😀</button>
                   <button onClick={() => fileInputRef.current?.click()} className="tool-btn">📎</button>
                   <button onClick={toggleRecording} className={`tool-btn ${isRecording ? "tool-btn--rec" : ""}`}>🎤{isRecording && <span className="rec-dot"></span>}</button>
@@ -1133,35 +1398,124 @@ export default function CipherChat() {
         </div>
       )}
 
-      {/* NEW: Call History Modal */}
+      {showContactProfile && activeChat?.type === "user" && (() => {
+        const c = contacts.find(c => c.phone_number === activeChat.id);
+        const label = c ? contactLabel(c) : activeChat.name;
+        const avatarUrl = c?.avatar_url;
+        const initials = label?.[0]?.toUpperCase() || "?";
+        return (
+          <div
+            className="file-viewer-overlay cp-backdrop"
+            onClick={() => setShowContactProfile(false)}
+          >
+            <div className="cp-modal" onClick={e => e.stopPropagation()}>
+              <button className="cp-close-btn" onClick={() => setShowContactProfile(false)}>✕</button>
+
+              <div className="cp-hero">
+                <div className="cp-avatar">
+                  {avatarUrl ? (
+                    <img src={avatarUrl} alt="Profile" className="img-cover" />
+                  ) : initials}
+                </div>
+
+                <div className="cp-name-wrap">
+                  <div className="cp-name">{label}</div>
+                  {nicknames[c?.phone_number || ""] && (
+                    <div className="cp-sub">{c?.display_name || c?.phone_number}</div>
+                  )}
+                </div>
+
+                <div className={`cp-badge ${c?.is_online ? "cp-badge-online" : "cp-badge-offline"}`}>
+                  <span className={`cp-badge-dot ${c?.is_online ? "online" : "offline"}`}></span>
+                  {c?.is_online ? "Online" : "Offline"}
+                </div>
+              </div>
+
+              <div className="cp-body">
+                <div className="cp-row">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2">
+                    <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" />
+                  </svg>
+                  <div>
+                    <div className="cp-row-label">Phone</div>
+                    <div className="cp-row-val">{c?.phone_number || activeChat.id}</div>
+                  </div>
+                </div>
+
+                <div className="cp-row cp-row-between">
+                  <div className="cp-row-align">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" strokeWidth="2">
+                      <path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2" /><circle cx="12" cy="7" r="4" />
+                    </svg>
+                    <div>
+                      <div className="cp-row-label">Your nickname</div>
+                      <div className={`cp-row-val ${!nicknames[c?.phone_number || ""] ? "muted" : ""}`}>
+                        {nicknames[c?.phone_number || ""] || "Not set"}
+                      </div>
+                    </div>
+                  </div>
+                  <button
+                    className="cp-edit-btn"
+                    onClick={() => {
+                      setShowContactProfile(false);
+                      openHeaderNicknameEdit();
+                    }}
+                  >
+                    {nicknames[c?.phone_number || ""] ? "Edit" : "Add"}
+                  </button>
+                </div>
+
+                <div className="cp-actions">
+                  <button className="cp-action-btn" onClick={() => { setShowContactProfile(false); startCall(false); }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" />
+                    </svg>
+                    Voice call
+                  </button>
+                  <button className="cp-action-btn primary" onClick={() => { setShowContactProfile(false); startCall(true); }}>
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect>
+                    </svg>
+                    Video call
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
       {showCallLogUI && (
         <div className="file-viewer-overlay" onClick={() => setShowCallLogUI(false)}>
-          <div className="viewer-content call-log-modal" onClick={e => e.stopPropagation()} style={{ background: "var(--bg, #1e1e1e)", padding: "20px", borderRadius: "12px", width: "400px", maxWidth: "90vw", maxHeight: "80vh", overflowY: "auto", border: "1px solid rgba(255,255,255,0.1)", boxShadow: "0 10px 40px rgba(0,0,0,0.5)" }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: "20px", borderBottom: "1px solid rgba(255,255,255,0.1)", paddingBottom: "10px" }}>
-              <h2 style={{ margin: 0, fontSize: "1.2rem", fontWeight: 600 }}>Call History</h2>
-              <button onClick={() => setShowCallLogUI(false)} style={{ background: "transparent", border: "none", color: "var(--text-muted, #aaa)", cursor: "pointer", fontSize: "1.2rem", padding: "5px" }}>✕</button>
+          <div className="viewer-content cl-modal" onClick={e => e.stopPropagation()}>
+            <div className="cl-header">
+              <h2 className="cl-title">Call History</h2>
+              <button className="cl-close" onClick={() => setShowCallLogUI(false)}>✕</button>
             </div>
-            
+
             {callLogs.length === 0 ? (
-              <p style={{ color: "var(--text-muted, #aaa)", textAlign: "center", padding: "40px 0", fontStyle: "italic" }}>No recent calls</p>
+              <p className="cl-empty">No recent calls</p>
             ) : (
-              <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+              <div className="cl-list">
                 {callLogs.map(log => (
-                  <div key={log.id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px", background: "rgba(255,255,255,0.03)", borderRadius: "8px" }}>
+                  <div key={log.id} className="cl-item">
                     <div>
-                      <strong style={{ display: "block", fontSize: "1rem", color: log.status === "missed" || log.status === "rejected" ? "#ff4d4f" : "var(--text, #fff)", marginBottom: "4px" }}>
-                        {log.peer}
+                      <strong className={`cl-item-name ${log.status === "missed" || log.status === "rejected" ? "missed" : ""}`}>
+                        {(() => {
+                          const c = contacts.find(c => c.phone_number === log.peer);
+                          return c ? contactLabel(c) : log.peer;
+                        })()}
                       </strong>
-                      <span style={{ fontSize: "0.8rem", color: "var(--text-muted, #aaa)", display: "flex", gap: "6px", alignItems: "center" }}>
+                      <span className="cl-item-meta">
                         <span>{log.direction === "incoming" ? "↙ Incoming" : "↗ Outgoing"}</span>
                         <span>•</span>
                         <span>{log.media === "video" ? "📹 Video" : "📞 Audio"}</span>
                         <span>•</span>
-                        <span>{new Date(log.timestamp).toLocaleString([], {month: 'short', day: 'numeric', hour: '2-digit', minute:'2-digit'})}</span>
+                        <span>{new Date(log.timestamp).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                       </span>
                     </div>
-                    <div style={{ fontSize: "0.85rem", color: "var(--text-muted, #aaa)", fontWeight: 500 }}>
-                      {log.status === "completed" ? `${Math.floor(log.duration / 60)}m ${log.duration % 60}s` : <span style={{ textTransform: "capitalize" }}>{log.status}</span>}
+                    <div className="cl-item-dur">
+                      {log.status === "completed" ? `${Math.floor(log.duration / 60)}m ${log.duration % 60}s` : <span className="cl-item-dur status">{log.status}</span>}
                     </div>
                   </div>
                 ))}
@@ -1171,11 +1525,10 @@ export default function CipherChat() {
         </div>
       )}
 
-      {/* WebRTC Call Overlay */}
       {callState !== "idle" && (
         <div className="call-overlay">
           <div className={`call-modal ${isVideoCall && callState === "connected" ? "video-active" : ""}`}>
-            <div style={{ display: (isVideoCall && (callState === "connected" || callState === "calling")) ? "block" : "none" }} className="video-container">
+            <div className={`video-container ${(isVideoCall && (callState === "connected" || callState === "calling")) ? "d-block" : "d-none"}`}>
               <video ref={remoteVideoRef} className="remote-video" autoPlay playsInline></video>
               <video ref={localVideoRef} className="local-video" autoPlay playsInline muted></video>
             </div>
@@ -1185,34 +1538,75 @@ export default function CipherChat() {
                 <div className={`call-avatar ${callState === "calling" || callState === "incoming" ? "pulse-anim" : ""}`}>
                   {callPeer?.[0]?.toUpperCase()}
                 </div>
-                <h2 className="call-name">{callPeer}</h2>
+                <h2 className="call-name">
+                  {callPeer && (() => {
+                    const c = contacts.find(c => c.phone_number === callPeer);
+                    return c ? contactLabel(c) : callPeer;
+                  })()}
+                </h2>
                 <p className="call-status">
-                  {callState === "incoming" ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...` : callState === "calling" ? "Calling..." : "Connected"}
+                  {callState === "incoming"
+                    ? `Incoming ${isVideoCall ? "Video" : "Voice"} Call...`
+                    : callState === "calling"
+                      ? "Calling..."
+                      : <span className="call-timer">{formatDuration(callDuration)}</span>}
                 </p>
               </div>
             )}
 
-            <div className="call-controls">
+            <div className="call-controls-wrapper">
               {callState === "incoming" ? (
-                <>
+                <div className="call-controls">
                   <button onClick={rejectCall} className="call-btn btn-reject" title="Reject">
                     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
                   <button onClick={acceptCall} className="call-btn btn-accept" title="Accept">
-                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 011.72 2.03z" /></svg>
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
                   </button>
-                </>
+                </div>
               ) : (
-                <button onClick={() => endCall(true)} className="call-btn btn-end" title="End Call">
-                  <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 011.72 2.03z" /></svg>
-                </button>
+                <div className="call-active-controls">
+                  <button onClick={toggleMute} className={`call-action-btn ${isMuted ? 'disabled-state' : ''}`} title="Mute/Unmute Mic">
+                    {isMuted ? (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="1" y1="1" x2="23" y2="23"></line><path d="M9 9v3a3 3 0 0 0 5.12 1.88M15 9.34V4a3 3 0 0 0-5.94-.6"></path><path d="M17 16.95A7 7 0 0 1 5 12v-2m14 0v2a7 7 0 0 1-.11 1.23"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                    ) : (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path><path d="M19 10v2a7 7 0 0 1-14 0v-2"></path><line x1="12" y1="19" x2="12" y2="23"></line><line x1="8" y1="23" x2="16" y2="23"></line></svg>
+                    )}
+                  </button>
+
+                  {isVideoCall && (
+                    <>
+                      <button onClick={toggleVideo} className={`call-action-btn ${isVideoMuted ? 'disabled-state' : ''}`} title="Turn Video On/Off">
+                        {isVideoMuted ? (
+                          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M16 16v1a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2h2m5.66 0H14a2 2 0 0 1 2 2v3.34l1 1L23 7v10"></path><line x1="1" y1="1" x2="23" y2="23"></line></svg>
+                        ) : (
+                          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="23 7 16 12 23 17 23 7"></polygon><rect x="1" y="5" width="15" height="14" rx="2" ry="2"></rect></svg>
+                        )}
+                      </button>
+                      <button onClick={switchCamera} className="call-action-btn" title="Switch Camera">
+                        <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M20 16.58A5 5 0 0 0 18 7h-1.26A8 8 0 1 0 4 15.25"></path><polyline points="15 12 20 17 25 12"></polyline></svg>
+                      </button>
+                    </>
+                  )}
+
+                  <button onClick={toggleSpeaker} className={`call-action-btn ${isSpeakerOff ? 'disabled-state' : ''}`} title="Speaker On/Off (Mute Remote)">
+                    {isSpeakerOff ? (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><line x1="23" y1="9" x2="17" y2="15"></line><line x1="17" y1="9" x2="23" y2="15"></line></svg>
+                    ) : (
+                      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon><path d="M19.07 4.93a10 10 0 0 1 0 14.14M15.54 8.46a5 5 0 0 1 0 7.07"></path></svg>
+                    )}
+                  </button>
+
+                  <button onClick={() => endCall(true)} className="call-btn btn-end" title="End Call">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M22 16.92v3a2 2 0 01-2.18 2 19.79 19.79 0 01-8.63-3.07A19.5 19.5 0 014.69 12a19.79 19.79 0 01-3.07-8.67A2 2 0 013.6 1.37h3a2 2 0 012 1.72c.127.96.361 1.903.7 2.81a2 2 0 01-.45 2.11L7.91 9a16 16 0 006.09 6.09l1.97-1.85a2 2 0 012.11-.45c.907.339 1.85.573 2.81.7a2 2 0 011.72 2.03z" /></svg>
+                  </button>
+                </div>
               )}
             </div>
           </div>
         </div>
       )}
 
-      {/* File Viewer Overlay */}
       {viewFile && (
         <div className="file-viewer-overlay" onClick={() => setViewFile(null)}>
           <button className="close-viewer" onClick={() => setViewFile(null)}>✕</button>
